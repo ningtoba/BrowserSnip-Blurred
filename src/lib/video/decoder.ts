@@ -128,7 +128,10 @@ function demuxWithMP4Box(arrayBuf: ArrayBuffer): Promise<{
     const checkInterval = setInterval(() => {
       if (ready && config && pendingSamples.length > 0) {
         clearInterval(checkInterval);
-        console.debug('[MP4Box]', pendingSamples.length, 'samples');
+        console.debug('[MP4Box]', pendingSamples.length, 'samples,',
+          'firstKey:', pendingSamples[0]?.key,
+          'desc:', config.description ? (config.description as ArrayBuffer).byteLength + ' bytes' : 'MISSING',
+          'codec:', config.codec);
         resolve({ config, chunks: pendingSamples });
       }
     }, 50);
