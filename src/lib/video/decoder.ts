@@ -93,15 +93,24 @@ function demuxWithMP4Box(arrayBuf: ArrayBuffer): Promise<{
     file.onReady = (info: any) => {
       const track = info.videoTracks?.[0];
       if (!track) { reject(new Error('No video track')); return; }
-      console.debug('[MP4Box] desc len:', track.description?.length, 'byteLength:', track.description?.byteLength);
+      // Dump all track properties
+      const keys = Object.getOwnPropertyNames(track);
+      for (const k of keys) { console.debug('[MP4Box] track prop:', k, '=', typeof track[k]); }
+      // Try to get description through mp4box internal
+      try {
+        const boxes = (file as any).boxes;
+        console.debug('[MP4Box] file boxes:', boxes ? Object.keys(boxes) : 'none');
+      } catch {}
+      // Try alternate ways
+      try {
+        const desc = (file as any).getTrackById?.(track.id)?.description;
+        console.debug('[MP4Box] alt desc:', desc?.length);
+      } catch {}
+      try {
+        const avcCBox = (file as any).moov?.trak?.[0]?.mdia?.minf?.stbl?.stsd?.entries?.[0]?.avcC;
+        console.debug('[MP4Box] avcC box:', avcCBox);
+      } catch {}
       config = { codec: track.codec, codedWidth: track.track_width, codedHeight: track.track_height };
-      if (track.description && track.description.length > 0) {
-        const descBuf = new ArrayBuffer(track.description.length);
-        new Uint8Array(descBuf).set(track.description);
-        (config as any).description = descBuf;
-        console.debug('[MP4Box] desc:', descBuf.byteLength, 'bytes');
-      }
-      console.debug('[MP4Box] codec:', track.codec, 'size:', track.track_width, 'x', track.track_height);
       file.setExtractionOptions(track.id, 'video');
       file.start();
       ready = true;
