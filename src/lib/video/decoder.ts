@@ -327,8 +327,9 @@ function parseWebM(buf: Uint8Array): { tracks: WebMTrack[]; clusters: { timestam
       off = elEnd;
     }
 
-    console.debug(`[WebM] ${tracks.length} tracks, ${clusters.length} clusters`);
-    if (tracks.length === 0 || clusters.length === 0) return null;
+    console.debug(`[WebM] ${tracks.length} tracks (${tracks.map(t => t.codec).join(', ')}), ${clusters.length} clusters, ${clusters.reduce((s, c) => s + c.blocks.length, 0)} blocks`);
+    if (tracks.length === 0) { console.debug('[WebM] no video tracks found'); return null; }
+    if (clusters.length === 0) { console.debug('[WebM] no clusters found'); return null; }
     return { tracks, clusters };
   } catch (e) {
     console.debug('[WebM] parse error:', e instanceof Error ? e.message : e);
@@ -436,10 +437,32 @@ export async function* decodeFramesWebCodecs(
   } else {
     // Try WebM
     const webm = parseWebM(buf);
-    if (!webm || webm.tracks.length === 0) throw new Error('Unsupported format — please use MP4 (H.264) or WebM (VP8/VP9)');
+    console.debug('[WebCodecs] WebM parse result:', webm ? `tracks=${webm.tracks.length} clusters=${webm.clusters.length}` : 'null');
+    if (!webm || webm.tracks.length === 0) throw new Error('Unsupported format — could not parse video track');
     const track = webm.tracks[0];
-    const isVP8 = track.codec.startsWith('V_VP8');
-    const codec = isVP8 ? 'vp8' : 'vp09.00.10.08';
+    console.debug('[WebCodecs] track codec:', track.codec, 'size:', track.width, 'x', track.height);
+    let config: VideoDecoderConfig;
+    if (track.codec.startsWith('V_VP8')) {
+      config = { codec: 'vp8' };
+    } else if (track.codec.startsWith('V_VP9')) {
+      config = { codec: 'vp09.00.10.08' };
+    } else if (track.codec.startsWith('V_AV1')) {
+      config = { codec: 'av01.0.04M.08' };
+    } else if (track.codec === 'V_MPEG4/ISO/AVC') {
+      // H.264 in MKV — use CodecPrivate as avcC
+      if (!track.codecPrivate || track.codecPrivate.length < 7) throw new Error('H.264 in MKV missing CodecPrivate');
+      const desc = new ArrayBuffer(track.codecPrivate.length);
+      new Uint8Array(desc).set(track.codecPrivate);
+      config = {
+        codec: 'avc1.' +
+          track.codecPrivate[1].toString(16).padStart(2, '0') +
+          track.codecPrivate[2].toString(16).padStart(2, '0') +
+          track.codecPrivate[3].toString(16).padStart(2, '0'),
+        description: desc,
+      };
+    } else {
+      throw new Error(`Unsupported codec: ${track.codec}`);
+    }
     const chunks: { data: ArrayBuffer; key: boolean }[] = [];
     for (const cluster of webm.clusters) {
       for (const block of cluster.blocks) {
@@ -457,7 +480,7 @@ export async function* decodeFramesWebCodecs(
         chunks.push({ data: ab, key });
       }
     }
-    console.debug(`[WebCodecs] WebM: ${chunks.length} blocks, codec: ${codec}`);
-    yield* decodeAndYield({ codec }, chunks, signal);
+    console.debug(`[WebCodecs] WebM/MKV: ${chunks.length} blocks, codec: ${JSON.stringify(config.codec)}`);
+    yield* decodeAndYield(config, chunks, signal);
   }
 }
