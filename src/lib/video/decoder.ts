@@ -124,9 +124,9 @@ function demuxWithMP4Box(arrayBuf: ArrayBuffer): Promise<{
       if (!track) { reject(new Error('No video track')); return; }
       config = { codec: track.codec, codedWidth: track.track_width, codedHeight: track.track_height };
       // Get avcC from track description or fallback to buffer scan
-      let desc = track.description as Uint8Array | undefined;
+      let desc: Uint8Array | undefined = track.description as Uint8Array | undefined;
       if (!desc || desc.length === 0) {
-        desc = extractAvcC(arrayBuf);
+        desc = extractAvcC(arrayBuf) ?? undefined;
         console.debug('[MP4Box] avcC from buffer:', desc?.length, 'bytes');
       }
       if (desc && desc.length > 0) {
