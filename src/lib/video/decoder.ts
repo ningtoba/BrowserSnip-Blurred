@@ -48,6 +48,18 @@ function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array } |
     if (!moov) { console.debug('[demux] moov not found'); return null; }
 
     const moovEnd = moov.offset + moov.size;
+    // Log child boxes of moov
+    const childBoxes: string[] = [];
+    let cbOff = moov.offset;
+    while (cbOff < moovEnd - 8) {
+      const cs = readUint32(buf, cbOff);
+      const ct = String.fromCharCode(buf[cbOff+4], buf[cbOff+5], buf[cbOff+6], buf[cbOff+7]);
+      if (cs < 8 || cbOff + cs > moovEnd) break;
+      childBoxes.push(ct + ':' + cs);
+      cbOff += cs;
+    }
+    console.debug('[demux] moov children:', childBoxes.join(', '));
+
     let trakOff = moov.offset;
     let avcC: Uint8Array | null = null;
     let stco: number[] = [], stsc: [number, number, number][] = [], stsz: number[] = [], stss = new Set<number>();
