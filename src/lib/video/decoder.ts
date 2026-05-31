@@ -93,11 +93,13 @@ function demuxWithMP4Box(arrayBuf: ArrayBuffer): Promise<{
     file.onReady = (info: any) => {
       const track = info.videoTracks?.[0];
       if (!track) { reject(new Error('No video track')); return; }
+      console.debug('[MP4Box] desc len:', track.description?.length, 'byteLength:', track.description?.byteLength);
       config = { codec: track.codec, codedWidth: track.track_width, codedHeight: track.track_height };
-      if (track.description) {
+      if (track.description && track.description.length > 0) {
         const descBuf = new ArrayBuffer(track.description.length);
         new Uint8Array(descBuf).set(track.description);
         (config as any).description = descBuf;
+        console.debug('[MP4Box] desc:', descBuf.byteLength, 'bytes');
       }
       console.debug('[MP4Box] codec:', track.codec, 'size:', track.track_width, 'x', track.track_height);
       file.setExtractionOptions(track.id, 'video');
