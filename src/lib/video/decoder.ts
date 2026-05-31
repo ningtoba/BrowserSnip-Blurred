@@ -128,21 +128,21 @@ export async function* decodeFramesWebCodecs(
   const ppsSample = samples.find((s) => s.type === 'pps');
   if (!spsSample || !ppsSample) throw new Error('SPS/PPS not found in bitstream');
 
-  const { config, descBytes } = buildCodecConfig(spsSample.data, ppsSample.data);
-  console.debug('[WebCodecs] codec:', config.codec, 'desc length:', descBytes.length);
+  // Build codec string from SPS
+  const codec = 'avc1.' +
+    spsSample.data[1].toString(16).padStart(2, '0') +
+    spsSample.data[2].toString(16).padStart(2, '0') +
+    spsSample.data[3].toString(16).padStart(2, '0');
 
-  // Validate config before using
+  // Use Annex B format (no avcC description) — the stream already has SPS/PPS
+  // embedded as NAL units, and chunks use start-code delimiters
+  const config: VideoDecoderConfig = { codec };
+  console.debug('[WebCodecs] codec:', codec, '(Annex B, no avcC)');
+
   const support = await VideoDecoder.isConfigSupported(config);
   console.debug('[WebCodecs] isConfigSupported:', support.supported);
   if (!support.supported) {
-    // Try without avcC description
-    const simpleConfig: VideoDecoderConfig = { codec: config.codec };
-    const simpleSupport = await VideoDecoder.isConfigSupported(simpleConfig);
-    console.debug('[WebCodecs] simple config supported:', simpleSupport.supported);
-    if (!simpleSupport.supported) {
-      throw new Error(`VideoDecoder config not supported for ${config.codec}`);
-    }
-    config.description = undefined;
+    throw new Error(`VideoDecoder config not supported for ${codec}`);
   }
 
   // Prepare frames for decoding
@@ -161,19 +161,36 @@ export async function* decodeFramesWebCodecs(
 
   decoder.configure(config);
 
-  // Feed NAL units — only start from the first IDR (keyframe)
+  // Feed NAL units in Annex B format — SPS/PPS must come first, then keyframe
   let timestamp = 0;
   const frameIntervalUs = 33_333;
-  let foundFirstKeyframe = false;
+  let foundKeyframe = false;
 
+  // First pass: include SPS and PPS (needed for Annex B without avcC)
+  for (const sample of samples) {
+    if (signal.aborted) break;
+    if (sample.data.length === 0) continue;
+    if (sample.type !== 'sps' && sample.type !== 'pps') continue;
+
+    const chunkBuf = new ArrayBuffer(sample.data.length);
+    new Uint8Array(chunkBuf).set(sample.data);
+    decoder.decode(new EncodedVideoChunk({
+      type: 'key',
+      timestamp,
+      duration: frameIntervalUs,
+      data: chunkBuf,
+    }));
+    timestamp += frameIntervalUs;
+  }
+
+  // Second pass: feed video frames, starting from first keyframe
   for (const sample of samples) {
     if (signal.aborted) break;
     if (sample.type === 'sps' || sample.type === 'pps') continue;
     if (sample.data.length === 0) continue;
 
-    // Skip non-IDR frames before the first keyframe
-    if (!foundFirstKeyframe && sample.type !== 'idr') continue;
-    foundFirstKeyframe = true;
+    if (!foundKeyframe && sample.type !== 'idr') continue;
+    foundKeyframe = true;
 
     const chunkBuf = new ArrayBuffer(sample.data.length);
     new Uint8Array(chunkBuf).set(sample.data);
@@ -187,7 +204,7 @@ export async function* decodeFramesWebCodecs(
     timestamp += frameIntervalUs;
   }
 
-  if (!foundFirstKeyframe) throw new Error('No keyframe found in bitstream');
+  if (!foundKeyframe) throw new Error('No keyframe found in bitstream');
 
   await decoder.flush();
 
