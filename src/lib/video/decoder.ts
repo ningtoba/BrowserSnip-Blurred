@@ -1,164 +1,184 @@
-import { getFFmpeg } from '@/lib/ffmpeg/core';
-
-interface H264Sample {
-  data: Uint8Array;
-  type: 'sps' | 'pps' | 'idr' | 'non-idr';
-}
-
 interface DecodedFrame {
   imageData: ImageData;
   timestamp: number;
   index: number;
 }
 
-function parseAnnexB(buffer: Uint8Array): H264Sample[] {
-  const samples: H264Sample[] = [];
-  let i = 0;
-  const len = buffer.length;
-
-  while (i < len - 4) {
-    // Find start code: 0x00 0x00 0x00 0x01 or 0x00 0x00 0x01
-    let startLen = 0;
-    if (buffer[i] === 0 && buffer[i + 1] === 0) {
-      if (buffer[i + 2] === 0 && buffer[i + 3] === 1) {
-        startLen = 4;
-      } else if (buffer[i + 2] === 1) {
-        startLen = 3;
-      }
-    }
-
-    if (startLen > 0) {
-      const nalStart = i + startLen;
-      // Find next start code
-      let nextStart = -1;
-      for (let j = nalStart; j < len - 3; j++) {
-        if (buffer[j] === 0 && buffer[j + 1] === 0) {
-          if ((buffer[j + 2] === 0 && buffer[j + 3] === 1) || buffer[j + 2] === 1) {
-            nextStart = j;
-            break;
-          }
-        }
-      }
-      if (nextStart === -1) nextStart = len;
-
-      const nalData = buffer.slice(nalStart, nextStart);
-      if (nalData.length > 0) {
-        const nalType = nalData[0] & 0x1f;
-        let type: H264Sample['type'];
-        if (nalType === 7) type = 'sps';
-        else if (nalType === 8) type = 'pps';
-        else if (nalType === 5) type = 'idr';
-        else type = 'non-idr';
-
-        samples.push({ data: nalData, type });
-      }
-      i = nextStart;
-    } else {
-      i++;
-    }
-  }
-
-  return samples;
+// Minimal MP4 demuxer — extracts H.264 samples in length-prefixed format
+interface MP4Sample {
+  offset: number;
+  size: number;
+  key: boolean;
 }
 
-function buildCodecConfig(sps: Uint8Array, pps: Uint8Array): { config: VideoDecoderConfig; descBytes: Uint8Array } {
-  const desc = new Uint8Array(8 + sps.length + 3 + pps.length);
-  desc[0] = 1;
-  desc[1] = sps[1];
-  desc[2] = sps[2];
-  desc[3] = sps[3];
-  desc[4] = 0xff;
-  desc[5] = 0xe1;
-  desc[6] = (sps.length >> 8) & 0xff;
-  desc[7] = sps.length & 0xff;
-  desc.set(sps, 8);
-  const off = 8 + sps.length;
-  desc[off] = 1;
-  desc[off + 1] = (pps.length >> 8) & 0xff;
-  desc[off + 2] = pps.length & 0xff;
-  desc.set(pps, off + 3);
+function readUint32(buf: Uint8Array, off: number): number {
+  return (buf[off] << 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3];
+}
 
-  const codec = 'avc1.' +
-    sps[1].toString(16).padStart(2, '0') +
-    sps[2].toString(16).padStart(2, '0') +
-    sps[3].toString(16).padStart(2, '0');
+function findBox(buf: Uint8Array, type: string, start: number, end: number): { offset: number; size: number } | null {
+  let off = start;
+  while (off < end - 8) {
+    const size = readUint32(buf, off);
+    const tag = String.fromCharCode(buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]);
+    if (size <= 0 || off + size > end) break;
+    if (tag === type) return { offset: off + 8, size: size - 8 };
+    off += size;
+  }
+  return null;
+}
 
-  // Copy to a standalone ArrayBuffer (not backed by the Uint8Array)
-  const buf = new ArrayBuffer(desc.length);
-  new Uint8Array(buf).set(desc);
+function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array; width: number; height: number } | null {
+  try {
+    // Find moov box
+    const moov = findBox(buf, 'moov', 0, buf.length);
+    if (!moov) return null;
 
-  return { config: { codec, description: buf }, descBytes: desc };
+    // Find trak with vide media
+    const moovEnd = moov.offset + moov.size;
+    let trakOff = moov.offset;
+    let avcC: Uint8Array | null = null;
+    let width = 0, height = 0;
+    let stco: number[] = [], stsc: [number, number, number][] = [], stsz: number[] = [], stss = new Set<number>();
+
+    while (trakOff < moovEnd - 8) {
+      const tSize = readUint32(buf, trakOff);
+      const tTag = String.fromCharCode(buf[trakOff + 4], buf[trakOff + 5], buf[trakOff + 6], buf[trakOff + 7]);
+      if (tSize <= 0 || trakOff + tSize > moovEnd) break;
+
+      if (tTag === 'trak') {
+        const stbl = findBox(buf, 'stbl', trakOff + 8, trakOff + tSize);
+        if (!stbl) { trakOff += tSize; continue; }
+        const stblEnd = stbl.offset + stbl.size;
+
+        // stsd: sample description (full box: version+flags at +0, count at +4)
+        const stsdBox = findBox(buf, 'stsd', stbl.offset, stblEnd);
+        if (stsdBox) {
+          const entryCount = readUint32(buf, stsdBox.offset + 4);
+          if (entryCount > 0) {
+            const entryStart = stsdBox.offset + 8; // after version+flags+count
+            const entrySize = readUint32(buf, entryStart);
+            const entryTag = String.fromCharCode(buf[entryStart + 4], buf[entryStart + 5], buf[entryStart + 6], buf[entryStart + 7]);
+            if (entryTag === 'avc1' || entryTag === 'avc3') {
+              width = (buf[entryStart + 24] << 8) | buf[entryStart + 25];
+              height = (buf[entryStart + 26] << 8) | buf[entryStart + 27];
+              // Scan for avcC fourCC within the entry data
+              for (let s = entryStart + 8; s < entryStart + entrySize - 12; s++) {
+                if (buf[s] === 0x61 && buf[s+1] === 0x76 && buf[s+2] === 0x63 && buf[s+3] === 0x43) { // 'avcC'
+                  const avcCSize = readUint32(buf, s - 4);
+                  if (avcCSize > 8 && avcCSize < entrySize) {
+                    avcC = buf.slice(s + 4, s - 4 + avcCSize);
+                  }
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        // stco/co64: chunk offsets (full box: version+flags at +0, count at +4)
+        let stcoBox = findBox(buf, 'stco', stbl.offset, stblEnd);
+        if (!stcoBox) stcoBox = findBox(buf, 'co64', stbl.offset, stblEnd);
+        if (stcoBox) {
+          const count = readUint32(buf, stcoBox.offset + 4);
+          for (let i = 0; i < count; i++) {
+            stco.push(readUint32(buf, stcoBox.offset + 8 + i * 4));
+          }
+        }
+
+        // stsc: sample-to-chunk (full box: version+flags at +0, count at +4)
+        const stscBox = findBox(buf, 'stsc', stbl.offset, stblEnd);
+        if (stscBox) {
+          const count = readUint32(buf, stscBox.offset + 4);
+          for (let i = 0; i < count; i++) {
+            const base = stscBox.offset + 8 + i * 12;
+            stsc.push([readUint32(buf, base), readUint32(buf, base + 4), readUint32(buf, base + 8)]);
+          }
+        }
+
+        // stsz: sample sizes (full box: version+flags at +0, sample_size at +4, count at +8)
+        const stszBox = findBox(buf, 'stsz', stbl.offset, stblEnd);
+        if (stszBox) {
+          const count = readUint32(buf, stszBox.offset + 8);
+          for (let i = 0; i < count; i++) {
+            stsz.push(readUint32(buf, stszBox.offset + 12 + i * 4));
+          }
+        }
+
+        // stss: sync samples (full box: version+flags at +0, count at +4)
+        const stssBox = findBox(buf, 'stss', stbl.offset, stblEnd);
+        if (stssBox) {
+          const count = readUint32(buf, stssBox.offset + 4);
+          for (let i = 0; i < count; i++) {
+            stss.add(readUint32(buf, stssBox.offset + 8 + i * 4) - 1); // 0-indexed
+          }
+        }
+
+        if (avcC && stco.length > 0 && stsc.length > 0 && stsz.length > 0) break;
+      }
+      trakOff += tSize;
+    }
+
+    if (!avcC) return null;
+
+    // Build sample list from stco/stsc/stsz
+    // stsc: [firstChunk, samplesPerChunk, sampleDescriptionIndex]
+    const samples: MP4Sample[] = [];
+    let stscIdx = 0;
+
+    for (let chunkIdx = 0; chunkIdx < stco.length; chunkIdx++) {
+      // Find stsc entry for this chunk
+      while (stscIdx + 1 < stsc.length && chunkIdx + 1 >= stsc[stscIdx + 1][0]) {
+        stscIdx++;
+      }
+      const [, samplesPerChunk] = stsc[stscIdx];
+      let chunkOffset = stco[chunkIdx];
+
+      for (let s = 0; s < samplesPerChunk; s++) {
+        const sampleIdx = samples.length;
+        if (sampleIdx >= stsz.length) break;
+        samples.push({
+          offset: chunkOffset,
+          size: stsz[sampleIdx],
+          key: stss.size === 0 || stss.has(sampleIdx),
+        });
+        chunkOffset += stsz[sampleIdx];
+      }
+    }
+
+    return { samples, avcC, width, height };
+  } catch {
+    return null;
+  }
 }
 
 export async function* decodeFramesWebCodecs(
   videoFile: File,
   signal: AbortSignal
 ): AsyncGenerator<DecodedFrame> {
-  const ffmpeg = await getFFmpeg();
+  const buf = new Uint8Array(await videoFile.arrayBuffer());
+  const demuxed = demuxMP4(buf);
+  if (!demuxed) throw new Error('Failed to demux MP4 — unsupported format');
 
-  // Write input video to MEMFS and extract Annex B bitstream
-  const inputBuf = new Uint8Array(await videoFile.arrayBuffer());
-  await ffmpeg.writeFile('input.mp4', inputBuf);
+  const { samples, avcC } = demuxed;
+  console.debug(`[WebCodecs] demuxed ${samples.length} samples, avcC: ${avcC.length} bytes`);
 
-  try {
-    await ffmpeg.exec(
-      ['-i', 'input.mp4', '-c:v', 'copy', '-bsf:v', 'h264_mp4toannexb', '-an', '-f', 'h264', 'video.h264'],
-      120_000
-    );
-  } catch {
-    // Try without the bitstream filter (for non-H.264 codecs)
-    await ffmpeg.exec(
-      ['-i', 'input.mp4', '-c:v', 'copy', '-an', '-f', 'h264', 'video.h264'],
-      120_000
-    );
-  }
-
-  // Read the raw H.264 bitstream
-  const h264Data = new Uint8Array((await ffmpeg.readFile('video.h264')) as Uint8Array);
-
-  try { await ffmpeg.deleteFile('input.mp4'); } catch { /* ignore */ }
-  try { await ffmpeg.deleteFile('video.h264'); } catch { /* ignore */ }
-
-  // Parse Annex B
-  const samples = parseAnnexB(h264Data);
-  if (samples.length === 0) throw new Error('No H.264 samples found');
-
-  const counts = { sps: 0, pps: 0, idr: 0, 'non-idr': 0 };
-  for (const s of samples) counts[s.type]++;
-  console.debug(`[WebCodecs] ${samples.length} NALs:`, counts);
-
-  // Find SPS and PPS for codec config
-  const spsSample = samples.find((s) => s.type === 'sps');
-  const ppsSample = samples.find((s) => s.type === 'pps');
-  if (!spsSample || !ppsSample) throw new Error('SPS/PPS not found in bitstream');
-
-  // Build avcC description from SPS/PPS (required for AVC/H.264)
-  const sps = spsSample.data;
-  const pps = ppsSample.data;
+  // Build codec string from avcC
   const codec = 'avc1.' +
-    sps[1].toString(16).padStart(2, '0') +
-    sps[2].toString(16).padStart(2, '0') +
-    sps[3].toString(16).padStart(2, '0');
+    avcC[1].toString(16).padStart(2, '0') +
+    avcC[2].toString(16).padStart(2, '0') +
+    avcC[3].toString(16).padStart(2, '0');
 
-  const avcC = new Uint8Array(8 + sps.length + 3 + pps.length);
-  avcC[0] = 1; avcC[1] = sps[1]; avcC[2] = sps[2]; avcC[3] = sps[3];
-  avcC[4] = 0xff; avcC[5] = 0xe1;
-  avcC[6] = (sps.length >> 8) & 0xff; avcC[7] = sps.length & 0xff;
-  avcC.set(sps, 8);
-  const off = 8 + sps.length;
-  avcC[off] = 1; avcC[off + 1] = (pps.length >> 8) & 0xff; avcC[off + 2] = pps.length & 0xff;
-  avcC.set(pps, off + 3);
+  // avcC is already in the correct format — just need a standalone ArrayBuffer
+  const descBuf = new ArrayBuffer(avcC.length);
+  new Uint8Array(descBuf).set(avcC);
 
-  const config: VideoDecoderConfig = { codec, description: avcC.buffer.slice(0) as ArrayBuffer };
-  console.debug('[WebCodecs] codec:', codec, 'avcC:', avcC.length, 'bytes');
+  const config: VideoDecoderConfig = { codec, description: descBuf };
+  console.debug('[WebCodecs] codec:', codec);
 
   const support = await VideoDecoder.isConfigSupported(config);
   console.debug('[WebCodecs] isConfigSupported:', support.supported);
-  if (!support.supported) {
-    throw new Error(`VideoDecoder config not supported for ${codec}`);
-  }
+  if (!support.supported) throw new Error(`VideoDecoder config not supported for ${codec}`);
 
-  // Prepare frames for decoding
   let frameIndex = 0;
   const frameQueue: VideoFrame[] = [];
   let decodeError: Error | null = null;
@@ -174,38 +194,29 @@ export async function* decodeFramesWebCodecs(
 
   decoder.configure(config);
 
-  // Feed NAL units in batches, yielding to event loop so decoder can process
+  // Feed MP4 samples directly (already in length-prefixed format)
   let timestamp = 0;
   const frameIntervalUs = 33_333;
-  let foundKeyframe = false;
-  let batchCount = 0;
 
-  for (const sample of samples) {
+  for (let i = 0; i < samples.length; i++) {
     if (signal.aborted) break;
-    if (sample.type === 'sps' || sample.type === 'pps') continue;
-    if (sample.data.length === 0) continue;
 
-    if (!foundKeyframe && sample.type !== 'idr') continue;
-    foundKeyframe = true;
-
-    const nalLen = sample.data.length;
-    const chunkBuf = new ArrayBuffer(4 + nalLen);
-    const view = new DataView(chunkBuf);
-    view.setUint32(0, nalLen, false);
-    new Uint8Array(chunkBuf, 4).set(sample.data);
+    const sample = samples[i];
+    const sampleData = buf.subarray(sample.offset, sample.offset + sample.size);
+    const chunkBuf = new ArrayBuffer(sampleData.length);
+    new Uint8Array(chunkBuf).set(sampleData);
 
     try {
       decoder.decode(new EncodedVideoChunk({
-        type: sample.type === 'idr' ? 'key' : 'delta',
+        type: sample.key ? 'key' : 'delta',
         timestamp,
         duration: frameIntervalUs,
         data: chunkBuf,
       }));
-    } catch (e) {
-      // Queue full — wait for it to drain
-      await new Promise(r => setTimeout(r, 50));
+    } catch {
+      await new Promise(r => setTimeout(r, 10));
       decoder.decode(new EncodedVideoChunk({
-        type: sample.type === 'idr' ? 'key' : 'delta',
+        type: sample.key ? 'key' : 'delta',
         timestamp,
         duration: frameIntervalUs,
         data: chunkBuf,
@@ -213,72 +224,46 @@ export async function* decodeFramesWebCodecs(
     }
     timestamp += frameIntervalUs;
 
-    // Yield to event loop every 30 chunks so decoder can process
-    if (++batchCount % 30 === 0) {
+    if (i % 30 === 0) {
       await new Promise(r => setTimeout(r, 0));
       if (decodeError) throw decodeError;
     }
   }
 
-  if (!foundKeyframe) throw new Error('No keyframe found in bitstream');
   if (decodeError) throw decodeError;
 
-  console.debug(`[WebCodecs] ${Math.round(timestamp / frameIntervalUs)} chunks sent, flushing...`);
-
-  // Flush with timeout
-  const flushResult = await Promise.race([
-    decoder.flush().then(() => 'ok'),
-    new Promise<string>(r => setTimeout(() => r('timeout'), 30000)),
+  console.debug(`[WebCodecs] ${samples.length} samples sent, flushing...`);
+  const flushOk = await Promise.race([
+    decoder.flush().then(() => true),
+    new Promise<boolean>(r => setTimeout(() => r(false), 30000)),
   ]);
-  console.debug(`[WebCodecs] flush: ${flushResult}, ${frameQueue.length} frames decoded`);
 
-  if (flushResult === 'timeout') {
+  if (!flushOk) {
     decoder.close();
     throw new Error('Decoder flush timed out after 30s');
   }
 
-  if (frameQueue.length === 0) {
-    decoder.close();
-    if (decodeError) throw decodeError;
-    throw new Error('Decoder produced 0 frames');
-  }
+  console.debug(`[WebCodecs] flush done, ${frameQueue.length} frames`);
 
-  // Read decoded frames
   const canvas = new OffscreenCanvas(1, 1);
   let ctx: OffscreenCanvasRenderingContext2D | null = null;
 
   for (const frame of frameQueue) {
-    if (signal.aborted) {
-      frame.close();
-      continue;
-    }
-
-    const w = frame.displayWidth;
-    const h = frame.displayHeight;
-
+    if (signal.aborted) { frame.close(); continue; }
+    const w = frame.displayWidth, h = frame.displayHeight;
     if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
+      canvas.width = w; canvas.height = h;
       ctx = canvas.getContext('2d', { willReadFrequently: true })!;
     } else {
       ctx = ctx ?? canvas.getContext('2d', { willReadFrequently: true })!;
     }
-
     ctx.drawImage(frame, 0, 0);
     const imageData = ctx.getImageData(0, 0, w, h);
-
-    const result: DecodedFrame = {
-      imageData,
-      timestamp: frame.timestamp / 1_000_000,
-      index: frameIndex,
-    };
-
-    frameIndex++;
     frame.close();
-    yield result;
+    yield { imageData, timestamp: frameIndex / 30, index: frameIndex };
+    frameIndex++;
   }
 
   decoder.close();
-
   if (decodeError) throw decodeError;
 }
