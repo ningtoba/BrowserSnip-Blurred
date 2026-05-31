@@ -71,7 +71,8 @@ export async function extractFramesAtTimestamps(
 export async function extractFramesStreaming(
   videoFile: File,
   onFrame: (imageData: ImageData, timestamp: number, index: number) => Promise<boolean>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  playbackRate: number = 0.5
 ): Promise<number> {
   const video = document.createElement('video');
   video.preload = 'auto';
@@ -90,6 +91,7 @@ export async function extractFramesStreaming(
 
   const w = video.videoWidth;
   const h = video.videoHeight;
+  video.playbackRate = playbackRate;
   const canvas = new OffscreenCanvas(w, h);
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
 
@@ -126,7 +128,6 @@ export async function extractFramesStreaming(
 
     video.requestVideoFrameCallback(cb);
     video.play().catch(() => {
-      // Autoplay blocked — fall back to muted play
       video.muted = true;
       video.play().catch(() => resolve(frameIndex));
     });

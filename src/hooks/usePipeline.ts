@@ -4,7 +4,7 @@ import { useProcessStore } from '@/stores/process-store';
 import {
   generateSampleTimestamps,
   extractFramesAtTimestamps,
-  extractFramesSeeking,
+  extractFramesStreaming,
   getVideoMetadata,
 } from '@/lib/video/extract';
 import { clusterFaces, matchDetectionsToIdentities } from '@/lib/engine/clustering';
@@ -203,8 +203,6 @@ export function usePipeline() {
   return matchMap;
 }
 
-const PROCESS_BATCH = 50;
-
 function cpuBlurFrame(
   imageData: ImageData,
   boxes: DetectionBox[],
@@ -224,41 +222,6 @@ function cpuBlurFrame(
   }
 
   return ctx.getImageData(0, 0, imageData.width, imageData.height);
-}
-
-async function encodeSegment(
-  ffmpeg: Awaited<ReturnType<typeof getFFmpeg>>,
-  startFrame: number,
-  endFrame: number,
-  fps: number,
-  width: number,
-  height: number,
-  segIndex: number
-): Promise<string> {
-  const segName = `seg_${segIndex}.mp4`;
-  await ffmpeg.exec(
-    [
-      '-start_number', startFrame.toString(),
-      '-f', 'rawvideo',
-      '-pixel_format', 'rgba',
-      '-video_size', `${width}x${height}`,
-      '-framerate', fps.toString(),
-      '-i', 'frame_%04d.rgba',
-      '-frames:v', (endFrame - startFrame + 1).toString(),
-      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
-      '-pix_fmt', 'yuv420p',
-      '-movflags', '+faststart',
-      segName,
-    ],
-    300_000
-  );
-
-  // Delete raw frame files for this segment to free MEMFS space
-  for (let f = startFrame; f <= endFrame; f++) {
-    try { await ffmpeg.deleteFile(`frame_${String(f).padStart(4, '0')}.rgba`); } catch { /* ignore */ }
-  }
-
-  return segName;
 }
 
 const processAndExport = useCallback(async () => {
@@ -281,15 +244,13 @@ const processAndExport = useCallback(async () => {
       const ffmpeg = await getFFmpeg();
 
       let globalFrameCount = 0;
-      let batchStart = 1;
-      let segIndex = 1;
       let lastBoxes: DetectionBox[] = [];
       let lastMatchMap = new Map<number, number>();
-      const segmentFiles: string[] = [];
 
       console.time('total-processing');
 
-      await extractFramesSeeking(
+      // Use linear playback — no seeking overhead, decoder runs efficiently
+      await extractFramesStreaming(
         file,
         async (imageData, timestamp, _index) => {
           if (signal.aborted) return false;
@@ -300,7 +261,31 @@ const processAndExport = useCallback(async () => {
 
           if (shouldDetect) {
             boxes = await detectFaces(imageData, width, height);
-            matchMap = matchToIdentitiesByIOU(boxes, scanDetections, identities, timestamp);
+            // Chain identities: first match to scan, then propagate frame-to-frame
+            if (lastMatchMap.size === 0) {
+              matchMap = matchToIdentitiesByIOU(boxes, scanDetections, identities, timestamp);
+            } else {
+              matchMap = new Map();
+              for (let ci = 0; ci < boxes.length; ci++) {
+                let bestIOU = 0.25;
+                let bestId = -1;
+                for (let pi = 0; pi < lastBoxes.length; pi++) {
+                  const iou = computeIOU(boxes[ci], lastBoxes[pi]);
+                  if (iou > bestIOU && lastMatchMap.has(pi)) {
+                    bestIOU = iou;
+                    bestId = lastMatchMap.get(pi)!;
+                  }
+                }
+                if (bestId >= 0) matchMap.set(ci, bestId);
+              }
+              // For unmatched boxes, try scan identities as fallback
+              if (matchMap.size < boxes.length) {
+                const scanMatch = matchToIdentitiesByIOU(boxes, scanDetections, identities, timestamp);
+                for (const [ci, id] of scanMatch) {
+                  if (!matchMap.has(ci)) matchMap.set(ci, id);
+                }
+              }
+            }
             lastBoxes = boxes;
             lastMatchMap = matchMap;
           } else {
@@ -318,19 +303,15 @@ const processAndExport = useCallback(async () => {
             outputData = cpuBlurFrame(imageData, boxes, targetIndices, blurConfig.type);
           }
 
-          const rawName = `frame_${String(globalFrameCount + 1).padStart(4, '0')}.rgba`;
-          await ffmpeg.writeFile(rawName, new Uint8Array(outputData.data.buffer, outputData.data.byteOffset, outputData.data.byteLength));
+          // Write as JPEG — ~200KB vs 8MB raw, fits easily in MEMFS
+          const jpgName = `frame_${String(globalFrameCount + 1).padStart(4, '0')}.jpg`;
+          const tmpCanvas = new OffscreenCanvas(width, height);
+          const tmpCtx = tmpCanvas.getContext('2d', { willReadFrequently: true })!;
+          tmpCtx.putImageData(outputData, 0, 0);
+          const blob = await tmpCanvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
+          await ffmpeg.writeFile(jpgName, new Uint8Array(await blob.arrayBuffer()));
 
           globalFrameCount++;
-
-          // Encode batch when we reach PROCESS_BATCH frames
-          if (globalFrameCount % PROCESS_BATCH === 0) {
-            const batchEnd = globalFrameCount;
-            const seg = await encodeSegment(ffmpeg, batchStart, batchEnd, fps, width, height, segIndex);
-            segmentFiles.push(seg);
-            batchStart = batchEnd + 1;
-            segIndex++;
-          }
 
           const pct = Math.round((globalFrameCount / totalFrames) * 100);
           updateProgress({
@@ -345,43 +326,39 @@ const processAndExport = useCallback(async () => {
         signal,
       );
 
-      // Encode remaining frames
-      if (globalFrameCount >= batchStart && !signal.aborted) {
-        const seg = await encodeSegment(ffmpeg, batchStart, globalFrameCount, fps, width, height, segIndex);
-        segmentFiles.push(seg);
-      }
-
       console.timeEnd('total-processing');
 
-      if (signal.aborted) return;
+      if (signal.aborted || globalFrameCount === 0) return;
 
+      // Single ffmpeg pass: JPEG frames → H.264 video
       setPhase('reconstructing');
       updateProgress({
-        phaseDescription: 'Concatenating segments...',
-        phasePercent: 50,
-        overallPercent: computeOverallPercent('reconstructing', 50),
+        phaseDescription: 'Encoding video...',
+        phasePercent: 0,
+        overallPercent: computeOverallPercent('reconstructing', 0),
       });
 
-      // Concat all segments
-      if (segmentFiles.length === 1) {
-        const data = await ffmpeg.readFile(segmentFiles[0]);
-        setOutput(new Blob([data], { type: 'video/mp4' }), URL.createObjectURL(new Blob([data], { type: 'video/mp4' })));
-      } else {
-        const concatContent = segmentFiles.map((s) => `file '${s}'`).join('\n');
-        await ffmpeg.writeFile('concat_list.txt', concatContent);
-        await ffmpeg.exec(
-          ['-f', 'concat', '-safe', '0', '-i', 'concat_list.txt', '-c', 'copy', '-movflags', '+faststart', 'output.mp4'],
-          600_000
-        );
-        const data = await ffmpeg.readFile('output.mp4');
-        setOutput(new Blob([data], { type: 'video/mp4' }), URL.createObjectURL(new Blob([data], { type: 'video/mp4' })));
+      await ffmpeg.exec(
+        [
+          '-framerate', fps.toString(),
+          '-i', 'frame_%04d.jpg',
+          '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+          '-pix_fmt', 'yuv420p',
+          '-threads', Math.min(4, navigator.hardwareConcurrency || 2).toString(),
+          '-movflags', '+faststart',
+          'output.mp4',
+        ],
+        600_000
+      );
 
-        // Cleanup
-        for (const seg of segmentFiles) {
-          try { await ffmpeg.deleteFile(seg); } catch { /* ignore */ }
-        }
-        try { await ffmpeg.deleteFile('concat_list.txt'); } catch { /* ignore */ }
+      const data = await ffmpeg.readFile('output.mp4');
+      setOutput(new Blob([data], { type: 'video/mp4' }), URL.createObjectURL(new Blob([data], { type: 'video/mp4' })));
+
+      // Clean up JPEG frames
+      for (let f = 1; f <= globalFrameCount; f++) {
+        try { await ffmpeg.deleteFile(`frame_${String(f).padStart(4, '0')}.jpg`); } catch { /* ignore */ }
       }
+      try { await ffmpeg.deleteFile('output.mp4'); } catch { /* ignore */ }
     } catch (err) {
       if (!signal.aborted) setError(err instanceof Error ? err.message : 'Processing failed');
     }
