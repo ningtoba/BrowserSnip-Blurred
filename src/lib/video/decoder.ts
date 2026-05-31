@@ -218,17 +218,34 @@ export async function* decodeFramesWebCodecs(
 
   // Use ffmpeg to remux ANY format to clean MP4 with H.264
   await ffmpeg.writeFile('input.bin', inputBuf);
-  await ffmpeg.exec(
-    ['-i', 'input.bin', '-c:v', 'copy', '-an', '-movflags', '+faststart', 'clean.mp4'],
-    120_000
-  );
+  try {
+    await ffmpeg.exec(
+      ['-i', 'input.bin', '-c:v', 'copy', '-an', '-movflags', '+faststart', 'clean.mp4'],
+      120_000
+    );
+  } catch (e) {
+    // -c:v copy may fail if codec not compatible with MP4; try transcoding
+    console.debug('[WebCodecs] copy failed, transcoding:', e instanceof Error ? e.message : e);
+    await ffmpeg.exec(
+      ['-i', 'input.bin', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-an', '-movflags', '+faststart', 'clean.mp4'],
+      300_000
+    );
+  }
 
   const mp4Data = new Uint8Array((await ffmpeg.readFile('clean.mp4')) as Uint8Array);
   try { await ffmpeg.deleteFile('input.bin'); } catch { /* ignore */ }
   try { await ffmpeg.deleteFile('clean.mp4'); } catch { /* ignore */ }
 
+  console.debug('[WebCodecs] remuxed MP4:', mp4Data.length, 'bytes, first bytes:',
+    Array.from(mp4Data.slice(0, 12)).map(b => b.toString(16).padStart(2,'0')).join(' '));
+
   const demuxed = demuxMP4(mp4Data);
-  if (!demuxed) throw new Error('Failed to parse remuxed MP4');
+  if (!demuxed) {
+    // Log why demux failed
+    const moov = findBox(mp4Data, 'moov', 0, mp4Data.length);
+    console.debug('[WebCodecs] demux failed, moov:', moov ? `found at ${moov.offset}` : 'not found');
+    throw new Error('Failed to parse remuxed MP4');
+  }
 
   const codec = 'avc1.' +
     demuxed.avcC[1].toString(16).padStart(2, '0') +
