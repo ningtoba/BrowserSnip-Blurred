@@ -455,16 +455,24 @@ export async function* decodeFramesWebCodecs(
     } else if (track.codec.startsWith('V_AV1')) {
       config = { codec: 'av01.0.04M.08' };
     } else if (track.codec === 'V_MPEG4/ISO/AVC') {
-      // H.264 in MKV — use CodecPrivate as avcC
+      // H.264 in MKV — extract SPS/PPS from CodecPrivate for in-band use
       if (!track.codecPrivate || track.codecPrivate.length < 7) throw new Error('H.264 in MKV missing CodecPrivate');
-      const desc = new ArrayBuffer(track.codecPrivate.length);
-      new Uint8Array(desc).set(track.codecPrivate);
+      const cp = track.codecPrivate;
+      // Parse avcC to get SPS and PPS
+      const spsLen = (cp[6] << 8) | cp[7];
+      const ppsOff = 8 + spsLen + 1; // after header + SPS + numPPS
+      const ppsLen = (cp[ppsOff] << 8) | cp[ppsOff + 1];
+      const spsData = cp.slice(8, 8 + spsLen);
+      const ppsData = cp.slice(ppsOff + 2, ppsOff + 2 + ppsLen);
+      console.debug('[WebM] SPS:', spsLen, 'bytes, PPS:', ppsLen, 'bytes');
+
+      // Use avc3 (in-band param sets) with description still provided
       config = {
-        codec: 'avc1.' +
-          track.codecPrivate[1].toString(16).padStart(2, '0') +
-          track.codecPrivate[2].toString(16).padStart(2, '0') +
-          track.codecPrivate[3].toString(16).padStart(2, '0'),
-        description: desc,
+        codec: 'avc3.' +
+          cp[1].toString(16).padStart(2, '0') +
+          cp[2].toString(16).padStart(2, '0') +
+          cp[3].toString(16).padStart(2, '0'),
+        description: cp.buffer.slice(cp.byteOffset, cp.byteOffset + cp.byteLength),
       };
     } else {
       throw new Error(`Unsupported codec: ${track.codec}`);
