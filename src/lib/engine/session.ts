@@ -162,11 +162,15 @@ export async function runYOLO(
   return boxes;
 }
 
-export async function runMFN(input: Float32Array): Promise<Float32Array> {
+export async function runMFN(
+  input: Float32Array | ort.Tensor
+): Promise<Float32Array> {
   const entry = sessions.get('mfn');
   if (!entry) throw new Error('MFN session not initialized');
 
-  const tensor = new ort.Tensor('float32', input, [1, 3, 112, 112]);
+  const tensor: ort.Tensor = input instanceof ort.Tensor
+    ? input
+    : new ort.Tensor('float32', input as Float32Array, [1, 3, 112, 112]);
   const feeds: Record<string, ort.Tensor> = {};
   feeds[entry.session.inputNames[0]] = tensor;
 

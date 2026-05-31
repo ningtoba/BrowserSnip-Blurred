@@ -1,3 +1,4 @@
+import * as ort from 'onnxruntime-web';
 import {
   imageDataToRGB,
   bgrToFloat32CHW,
@@ -5,6 +6,7 @@ import {
   resizeImageData,
 } from '@/lib/utils/image';
 import { runMFN } from '@/lib/engine/session';
+import { getGPUDevice } from '@/lib/webgpu/context';
 import { l2Normalize } from '@/lib/utils/math';
 import { FACE_INPUT_SIZE, FACE_EXPAND_RATIO } from '@/lib/constants';
 import type { DetectionBox } from '@/types';
@@ -31,10 +33,16 @@ export function expandBbox(
   };
 }
 
-export function preprocessMFN(cropImageData: ImageData): Float32Array {
+async function preprocessMFN_GPU(cropImageData: ImageData): Promise<ort.Tensor> {
+  const { preprocessMFN } = await import('@/lib/webgpu/preprocess');
+  return preprocessMFN(cropImageData);
+}
+
+async function preprocessMFN_CPU(cropImageData: ImageData): Promise<ort.Tensor> {
   const resized = resizeImageData(cropImageData, FACE_INPUT_SIZE, FACE_INPUT_SIZE);
   const rgb = imageDataToRGB(resized);
-  return bgrToFloat32CHW(rgb, FACE_INPUT_SIZE, FACE_INPUT_SIZE, MFN_MEAN, MFN_STD);
+  const data = bgrToFloat32CHW(rgb, FACE_INPUT_SIZE, FACE_INPUT_SIZE, MFN_MEAN, MFN_STD);
+  return new ort.Tensor('float32', data, [1, 3, FACE_INPUT_SIZE, FACE_INPUT_SIZE]);
 }
 
 export async function recognizeFace(
@@ -58,8 +66,20 @@ export async function recognizeFace(
       h
     );
 
-    const tensor = preprocessMFN(cropped);
+    let tensor: ort.Tensor;
+    const gpuDev = await getGPUDevice();
+    if (gpuDev) {
+      try {
+        tensor = await preprocessMFN_GPU(cropped);
+      } catch {
+        tensor = await preprocessMFN_CPU(cropped);
+      }
+    } else {
+      tensor = await preprocessMFN_CPU(cropped);
+    }
+
     const embedding = await runMFN(tensor);
+    tensor.dispose();
     return l2Normalize(embedding);
   } catch {
     return null;
