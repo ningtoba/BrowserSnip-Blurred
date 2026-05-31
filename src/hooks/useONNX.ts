@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { initSession, disposeAll, hasWebGPU, getBackend } from '@/lib/engine/session';
+import { initSession, disposeAll, hasWebGPU } from '@/lib/engine/session';
 import { MODELS } from '@/lib/constants';
 
 interface ONNXState {
@@ -13,9 +13,7 @@ export function useONNX(): ONNXState {
   const [state, setState] = useState<ONNXState>({
     gpuAccelerated: hasWebGPU(),
     modelsReady: false,
-    loadingMessage: hasWebGPU()
-      ? 'Checking WebGPU support...'
-      : 'WebGPU not available, using CPU fallback...',
+    loadingMessage: 'Loading AI models...',
     loadingPercent: 0,
   });
 
@@ -48,15 +46,13 @@ export function useONNX(): ONNXState {
       }));
     }
 
-    const detBackend = getBackend('yunet');
-    const mfnBackend = getBackend('mfn');
-    const gpuOk = detBackend === 'webgpu';
+    const gpuOk = hasWebGPU();
     setState((s) => ({
       ...s,
       gpuAccelerated: gpuOk,
       loadingMessage: gpuOk
-        ? 'WebGPU active — inference on GPU'
-        : `Inference on ${detBackend ?? 'CPU'} (WebGPU unavailable for detection)`,
+        ? 'Ready — blur accelerated by WebGPU'
+        : 'Ready — CPU only',
       loadingPercent: 80,
     }));
 

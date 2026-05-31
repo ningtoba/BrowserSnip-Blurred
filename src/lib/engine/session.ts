@@ -41,23 +41,6 @@ async function fetchModelBuffer(url: string, signal: AbortSignal): Promise<Array
   return buffer;
 }
 
-async function createWebGPUSession(modelBuffer: ArrayBuffer): Promise<ort.InferenceSession> {
-  const session = await ort.InferenceSession.create(modelBuffer, {
-    executionProviders: [
-      {
-        name: 'webgpu',
-        validationMode: 'disabled',
-      },
-    ],
-    graphOptimizationLevel: 'all',
-    enableCpuMemArena: true,
-    enableMemPattern: true,
-    intraOpNumThreads: Math.max(2, navigator.hardwareConcurrency || 4),
-  });
-
-  return session;
-}
-
 async function createWasmSession(modelBuffer: ArrayBuffer): Promise<ort.InferenceSession> {
   const session = await ort.InferenceSession.create(modelBuffer, {
     executionProviders: ['wasm'],
@@ -73,7 +56,6 @@ async function createWasmSession(modelBuffer: ArrayBuffer): Promise<ort.Inferenc
 export async function initSession(name: ModelName, signal?: AbortSignal): Promise<void> {
   if (sessions.has(name)) return;
 
-  // If already loading, wait for the existing promise
   const existing = loading.get(name);
   if (existing) {
     try {
@@ -91,7 +73,6 @@ export async function initSession(name: ModelName, signal?: AbortSignal): Promis
     ? abortController.signal
     : abortController.signal;
 
-  // Link external signal
   if (signal) {
     signal.addEventListener('abort', () => abortController.abort(), { once: true });
   }
@@ -99,29 +80,15 @@ export async function initSession(name: ModelName, signal?: AbortSignal): Promis
   const promise = (async () => {
     const buffer = await fetchModelBuffer(config.url, linkedSignal);
 
-    // Check generation — if disposeAll was called, abort
     if (gen !== generation) {
       return;
     }
 
-    let session: ort.InferenceSession;
-    let backend: 'webgpu' | 'wasm';
+    // Use WASM backend — WebGPU JSEP has severe GPU↔CPU op switching overhead
+    // that makes small models like YuNet run 100x+ slower than expected
+    const session = await createWasmSession(buffer);
+    const backend: 'webgpu' | 'wasm' = 'wasm';
 
-    if (hasWebGPU()) {
-      try {
-        session = await createWebGPUSession(buffer);
-        backend = 'webgpu';
-      } catch (err) {
-        console.warn(`WebGPU init failed for ${name}, falling back to WASM:`, err instanceof Error ? err.message : err);
-        session = await createWasmSession(buffer);
-        backend = 'wasm';
-      }
-    } else {
-      session = await createWasmSession(buffer);
-      backend = 'wasm';
-    }
-
-    // Final generation check before storing
     if (gen !== generation) {
       session.release();
       return;
