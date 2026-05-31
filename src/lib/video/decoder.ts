@@ -45,12 +45,13 @@ function findBox(buf: Uint8Array, type: string, start: number, end: number): { o
 function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array } | null {
   try {
     const moov = findBox(buf, 'moov', 0, buf.length);
-    if (!moov) return null;
+    if (!moov) { console.debug('[demux] moov not found'); return null; }
 
     const moovEnd = moov.offset + moov.size;
     let trakOff = moov.offset;
     let avcC: Uint8Array | null = null;
     let stco: number[] = [], stsc: [number, number, number][] = [], stsz: number[] = [], stss = new Set<number>();
+    let scannedTracks = 0;
 
     while (trakOff < moovEnd - 8) {
       const tSize = readUint32(buf, trakOff);
@@ -58,6 +59,7 @@ function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array } |
       if (tSize <= 0 || trakOff + tSize > moovEnd) break;
 
       if (tTag === 'trak') {
+        scannedTracks++;
         const stbl = findBox(buf, 'stbl', trakOff + 8, trakOff + tSize);
         if (!stbl) { trakOff += tSize; continue; }
         const stblEnd = stbl.offset + stbl.size;
@@ -69,12 +71,16 @@ function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array } |
             const entryStart = stsdBox.offset + 8;
             const entrySize = readUint32(buf, entryStart);
             const entryTag = String.fromCharCode(buf[entryStart + 4], buf[entryStart + 5], buf[entryStart + 6], buf[entryStart + 7]);
+            console.debug('[demux] trak', scannedTracks, 'entry:', entryTag, 'size:', entrySize);
             if (entryTag === 'avc1' || entryTag === 'avc3' || entryTag === 'hvc1' || entryTag === 'hev1') {
               for (let s = entryStart + 8; s < entryStart + entrySize - 12; s++) {
                 if ((buf[s]===0x61 && buf[s+1]===0x76 && buf[s+2]===0x63 && buf[s+3]===0x43) ||
                     (buf[s]===0x68 && buf[s+1]===0x76 && buf[s+2]===0x63 && buf[s+3]===0x43)) {
                   const cfgSize = readUint32(buf, s - 4);
-                  if (cfgSize > 8 && cfgSize < entrySize) avcC = buf.slice(s + 4, s - 4 + cfgSize);
+                  if (cfgSize > 8 && cfgSize < entrySize) {
+                    avcC = buf.slice(s + 4, s - 4 + cfgSize);
+                    console.debug('[demux] found config box at offset', s - 4, 'size:', avcC.length);
+                  }
                   break;
                 }
               }
@@ -110,11 +116,15 @@ function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array } |
           for (let i = 0; i < count; i++) stss.add(readUint32(buf, stssBox.offset + 8 + i * 4) - 1);
         }
 
+        console.debug('[demux] trak', scannedTracks, 'stco:', stco.length, 'stsz:', stsz.length, 'avcC:', !!avcC);
         if (avcC && stco.length > 0 && stsz.length > 0) break;
+        // Reset for next track
+        stco = []; stsc = []; stsz = []; stss = new Set();
       }
       trakOff += tSize;
     }
 
+    console.debug('[demux] final: avcC=', !!avcC, 'stco=', stco.length, 'stsz=', stsz.length);
     if (!avcC || stco.length === 0 || stsz.length === 0) return null;
 
     const samples: MP4Sample[] = [];
