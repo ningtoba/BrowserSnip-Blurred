@@ -357,7 +357,7 @@ async function* decodeAndYield(
 
   const decoder = new VideoDecoder({
     output(frame: VideoFrame) { frameQueue.push(frame); },
-    error(err: Error) { decodeError = err; },
+    error(err: Error) { console.debug('[WebCodecs] decoder error:', err.message); decodeError = err; },
   });
 
   decoder.configure(config);
@@ -486,7 +486,7 @@ export async function* decodeFramesWebCodecs(
         chunks.push({ data: ab, key });
       }
     }
-    console.debug(`[WebCodecs] WebM/MKV: ${chunks.length} blocks, codec: ${JSON.stringify(config.codec)}`);
+    console.debug(`[WebCodecs] WebM/MKV: ${chunks.length} blocks, codec: ${JSON.stringify(config.codec)}`, 'firstKey:', chunks[0]?.key, 'firstSize:', chunks[0]?.data.byteLength);
     yield* decodeAndYield(config, chunks, signal);
   }
 }
