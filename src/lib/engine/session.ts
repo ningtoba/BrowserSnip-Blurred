@@ -13,15 +13,48 @@ function getConfig(name: ModelName) {
   return config;
 }
 
+async function fetchModelBuffer(url: string): Promise<ArrayBuffer> {
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    throw new Error(
+      `Model file not found at ${url}. Place the ONNX model in public/models/. ` +
+      `See README.md for instructions on obtaining the required models.`
+    );
+  }
+
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.includes('text/html')) {
+    throw new Error(
+      `Model file not found at ${url} (received HTML instead of binary). ` +
+      `Place the ONNX model in public/models/. See README.md.`
+    );
+  }
+
+  const buffer = await response.arrayBuffer();
+
+  if (buffer.byteLength < 1024) {
+    throw new Error(
+      `File at ${url} is too small (${buffer.byteLength} bytes) to be an ONNX model. ` +
+      `Ensure you have placed the actual ONNX file, not a placeholder.`
+    );
+  }
+
+  return buffer;
+}
+
 export async function initSession(name: ModelName): Promise<void> {
   if (sessions.has(name)) return;
   if (loading.has(name)) return loading.get(name)!;
 
   const config = getConfig(name);
   const promise = (async () => {
-    const session = await ort.InferenceSession.create(config.url, {
+    const buffer = await fetchModelBuffer(config.url);
+
+    const session = await ort.InferenceSession.create(buffer, {
       executionProviders: ['webgpu'],
     });
+
     sessions.set(name, session);
   })();
 
