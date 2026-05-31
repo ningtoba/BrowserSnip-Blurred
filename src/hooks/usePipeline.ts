@@ -7,6 +7,7 @@ import {
   extractFramesSeeking,
   getVideoMetadata,
 } from '@/lib/video/extract';
+import { decodeFramesWebCodecs } from '@/lib/video/decoder';
 import { clusterFaces, matchDetectionsToIdentities } from '@/lib/engine/clustering';
 // reconstructVideoRaw inlined for batch processing
 import { detectFaces } from '@/lib/engine/detection';
@@ -253,10 +254,33 @@ const processAndExport = useCallback(async () => {
 
       console.time('total-processing');
 
-      await extractFramesSeeking(
-        file,
-        async (imageData, timestamp, _index) => {
+      // Try WebCodecs hardware decode first, fall back to seek-based
+      let webCodecsFailed = false;
+      try {
+        for await (const { imageData, timestamp } of decodeFramesWebCodecs(file, signal)) {
+          await processFrame(imageData, timestamp);
+        }
+      } catch (err) {
+        console.warn('WebCodecs decode failed, falling back to seek-based:', err instanceof Error ? err.message : err);
+        webCodecsFailed = true;
+        // Reset state for seek-based retry
+        globalFrameCount = 0;
+        lastBoxes = [];
+        prevBoxes = [];
+        lastMatchMap = new Map();
+        lastDetFrame = 0;
+      }
+
+      if (webCodecsFailed) {
+        await extractFramesSeeking(file, async (imageData, timestamp) => {
           if (signal.aborted) return false;
+          await processFrame(imageData, timestamp);
+          return true;
+        }, signal);
+      }
+
+      async function processFrame(imageData: ImageData, timestamp: number) {
+          if (signal.aborted) return;
 
           const shouldDetect = globalFrameCount % DETECT_EVERY_N_FRAMES === 0;
           let boxes: DetectionBox[];
@@ -264,7 +288,6 @@ const processAndExport = useCallback(async () => {
 
           if (shouldDetect) {
             boxes = await detectFaces(imageData, width, height);
-            // Chain identities frame-to-frame via IOU
             if (lastMatchMap.size === 0) {
               matchMap = matchToIdentitiesByIOU(boxes, scanDetections, identities, timestamp);
             } else {
@@ -288,16 +311,13 @@ const processAndExport = useCallback(async () => {
                 }
               }
             }
-            // Save velocity reference for interpolation
             prevBoxes = lastBoxes.length === boxes.length ? lastBoxes : boxes;
             lastBoxes = boxes;
             lastMatchMap = matchMap;
             lastDetFrame = globalFrameCount;
           } else {
-            // Interpolate bboxes using velocity from last detection
             const dt = globalFrameCount - lastDetFrame;
-            const totalSteps = DETECT_EVERY_N_FRAMES;
-            const t = dt / totalSteps;
+            const t = dt / DETECT_EVERY_N_FRAMES;
             boxes = lastBoxes.map((b, i) => {
               if (i < prevBoxes.length && prevBoxes[i]) {
                 return {
@@ -323,7 +343,6 @@ const processAndExport = useCallback(async () => {
             outputData = cpuBlurFrame(imageData, boxes, targetIndices, blurConfig.type);
           }
 
-          // Write JPEG — reuse single canvas
           const jpgName = `frame_${String(globalFrameCount + 1).padStart(4, '0')}.jpg`;
           jpgCtx.putImageData(outputData, 0, 0);
           const blob = await jpgCanvas.convertToBlob({ type: 'image/jpeg', quality: 0.75 });
@@ -338,11 +357,7 @@ const processAndExport = useCallback(async () => {
             overallPercent: computeOverallPercent('processing-frames', pct),
             detail: `Frame ${globalFrameCount}/${totalFrames}`,
           });
-
-          return true;
-        },
-        signal,
-      );
+      }
 
       console.timeEnd('total-processing');
 
