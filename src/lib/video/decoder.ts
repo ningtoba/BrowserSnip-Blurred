@@ -479,11 +479,34 @@ export async function* decodeFramesWebCodecs(
         const flagsOff = tkVint.len + 2;
         const dataOff = flagsOff + 1;
         if (dataOff >= block.length) continue;
-        const key = (block[flagsOff] & 0x80) !== 0;
-        const frameData = block.slice(dataOff);
+        const flags = block[flagsOff];
+        const key = (flags & 0x80) !== 0;
+        const lacing = (flags & 0x04) !== 0;
+        let frameStart = dataOff;
+        if (lacing) {
+          // Skip lacing header: number_of_frames(1) + frame_sizes
+          const numFrames = block[dataOff] + 1;
+          let lacingOff = dataOff + 1;
+          // Xiph lacing: variable-size encoding of frame sizes
+          for (let lf = 0; lf < numFrames - 1; lf++) {
+            let sz = 0;
+            while (lacingOff < block.length && block[lacingOff] === 0xff) {
+              sz += 0xff;
+              lacingOff++;
+            }
+            sz += block[lacingOff];
+            lacingOff++;
+          }
+          frameStart = lacingOff;
+        }
+        const frameData = block.slice(frameStart);
         const ab = new ArrayBuffer(frameData.length);
         new Uint8Array(ab).set(frameData);
         chunks.push({ data: ab, key });
+        if (chunks.length === 1) {
+          console.debug('[WebM] first frame: key=', key, 'lacing=', lacing, 'size=', frameData.length,
+            'firstBytes:', Array.from(frameData.slice(0, 12)).map(b => b.toString(16).padStart(2,'0')).join(' '));
+        }
       }
     }
     console.debug(`[WebCodecs] WebM/MKV: ${chunks.length} blocks, codec: ${JSON.stringify(config.codec)}`, 'firstKey:', chunks[0]?.key, 'firstSize:', chunks[0]?.data.byteLength);
