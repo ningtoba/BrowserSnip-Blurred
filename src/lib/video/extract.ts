@@ -141,6 +141,77 @@ export async function extractFramesStreaming(
   return result;
 }
 
+export async function extractFramesZeroCopy(
+  videoFile: File,
+  onFrame: (video: HTMLVideoElement, imageData: ImageData, timestamp: number, index: number) => Promise<boolean>,
+  signal?: AbortSignal
+): Promise<number> {
+  const video = document.createElement('video');
+  video.preload = 'auto';
+  video.muted = true;
+  video.crossOrigin = 'anonymous';
+  video.playsInline = true;
+
+  const url = URL.createObjectURL(videoFile);
+  video.src = url;
+
+  await new Promise<void>((resolve, reject) => {
+    video.addEventListener('loadedmetadata', () => resolve(), { once: true });
+    video.addEventListener('error', () => reject(new Error('Failed to load video')), { once: true });
+    video.load();
+  });
+
+  const w = video.videoWidth;
+  const h = video.videoHeight;
+  const canvas = new OffscreenCanvas(w, h);
+  const ctx = canvas.getContext('2d')!;
+
+  let frameIndex = 0;
+  let stopped = false;
+
+  const processLoop = new Promise<number>((resolve) => {
+    const cb: VideoFrameRequestCallback = (_now, _metadata) => {
+      if (signal?.aborted || stopped || video.ended) {
+        resolve(frameIndex);
+        return;
+      }
+
+      ctx.drawImage(video, 0, 0, w, h);
+      const imageData = ctx.getImageData(0, 0, w, h);
+
+      onFrame(video, imageData, video.currentTime, frameIndex)
+        .then((keepGoing) => {
+          if (!keepGoing || signal?.aborted || video.ended) {
+            stopped = true;
+            video.pause();
+            resolve(frameIndex);
+            return;
+          }
+          frameIndex++;
+          video.requestVideoFrameCallback(cb);
+        })
+        .catch(() => {
+          video.pause();
+          resolve(frameIndex);
+        });
+    };
+
+    video.requestVideoFrameCallback(cb);
+    video.play().catch(() => {
+      video.muted = true;
+      video.play().catch(() => resolve(frameIndex));
+    });
+  });
+
+  const result = await processLoop;
+
+  video.pause();
+  URL.revokeObjectURL(url);
+  video.remove();
+
+  return result;
+}
+
 let lastProgressUpdate = 0;
 
 function updateProgressThrottled(

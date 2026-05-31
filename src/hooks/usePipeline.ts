@@ -5,11 +5,12 @@ import {
   generateSampleTimestamps,
   extractFramesAtTimestamps,
   extractFramesStreaming,
+  extractFramesZeroCopy,
   getVideoMetadata,
 } from '@/lib/video/extract';
 import { clusterFaces, matchDetectionsToIdentities } from '@/lib/engine/clustering';
 import { reconstructVideo } from '@/lib/video/reconstruct';
-import { detectFaces } from '@/lib/engine/detection';
+import { detectFaces, postprocessYOLO } from '@/lib/engine/detection';
 import { recognizeFace } from '@/lib/engine/recognition';
 import { applyBlurToFrame } from '@/lib/engine/blur';
 import { SAMPLE_FPS, PHASE_WEIGHTS, BATCH_SIZE, DETECT_EVERY_N_FRAMES, DETECTION_CONFIDENCE } from '@/lib/constants';
@@ -183,9 +184,9 @@ export function usePipeline() {
       const offscreen = new OffscreenCanvas(metadata.width, metadata.height);
       const offCtx = offscreen.getContext('2d')!;
 
-      await extractFramesStreaming(
+      await extractFramesZeroCopy(
         file,
-        async (imageData, _timestamp, _index) => {
+        async (video, imageData, timestamp, _index) => {
           if (signal.aborted) return false;
 
           const shouldDetect = globalFrameCount % DETECT_EVERY_N_FRAMES === 0;
@@ -193,11 +194,25 @@ export function usePipeline() {
           let detections: FaceDetection[];
 
           if (shouldDetect) {
-            boxes = await detectFaces(imageData, metadata.width, metadata.height);
+            // Try zero-copy GPU path: importExternalTexture from video element → GPUBuffer → ORT
+            let usedZeroCopy = false;
+            try {
+              const { preprocessFromVideoElement } = await import('@/lib/webgpu/video');
+              const { runYOLO } = await import('@/lib/engine/session');
+              const zcResult = await preprocessFromVideoElement(video, metadata.width, metadata.height);
+              const rawBoxes = await runYOLO(zcResult.tensor);
+              zcResult.tensor.dispose();
+              boxes = postprocessYOLO(rawBoxes, metadata.width, metadata.height, zcResult.scale, zcResult.padLeft, zcResult.padTop);
+              usedZeroCopy = true;
+            } catch {
+              boxes = await detectFaces(imageData, metadata.width, metadata.height);
+            }
+
             detections = boxes.map((box, di) => ({
-              ...box, frameIndex: di, frameTimestamp: _timestamp,
+              ...box, frameIndex: di, frameTimestamp: timestamp,
             }));
 
+            // Recognition still uses ImageData path (face crops are small)
             for (const det of detections) {
               const emb = await recognizeFace(imageData, det, metadata.width, metadata.height);
               if (emb) det.embedding = emb;
@@ -208,7 +223,7 @@ export function usePipeline() {
           } else {
             boxes = lastBoxes.map((b) => ({ ...b }));
             detections = lastDetections.map((d) => ({
-              ...d, frameIndex: globalFrameCount, frameTimestamp: _timestamp,
+              ...d, frameIndex: globalFrameCount, frameTimestamp: timestamp,
             }));
           }
 
