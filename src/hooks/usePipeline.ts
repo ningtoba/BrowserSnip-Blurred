@@ -4,7 +4,7 @@ import { useProcessStore } from '@/stores/process-store';
 import {
   generateSampleTimestamps,
   extractFramesAtTimestamps,
-  extractFramesStreaming,
+  extractFramesSeeking,
   getVideoMetadata,
 } from '@/lib/video/extract';
 import { clusterFaces, matchDetectionsToIdentities } from '@/lib/engine/clustering';
@@ -249,8 +249,8 @@ const processAndExport = useCallback(async () => {
 
       console.time('total-processing');
 
-      // Use linear playback — no seeking overhead, decoder runs efficiently
-      await extractFramesStreaming(
+      // Seek-based: processes every frame, decoder advances sequentially
+      await extractFramesSeeking(
         file,
         async (imageData, timestamp, _index) => {
           if (signal.aborted) return false;

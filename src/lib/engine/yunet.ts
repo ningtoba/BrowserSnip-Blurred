@@ -111,7 +111,8 @@ export async function detectFacesYuNet(
   dstCtx.drawImage(src, 0, 0, modelW, modelH);
   const resized = dstCtx.getImageData(0, 0, modelW, modelH);
 
-  const detScale = modelH / origHeight;
+  const detScaleX = modelW / origWidth;
+  const detScaleY = modelH / origHeight;
 
   // Preprocess: RGB CHW with raw pixel values
   let chw: Float32Array;
@@ -169,10 +170,10 @@ export async function detectFacesYuNet(
       const bw = Math.exp(dw) * stride;
       const bh = Math.exp(dh) * stride;
 
-      const x1 = (cx - bw / 2) / detScale;
-      const y1 = (cy - bh / 2) / detScale;
-      const x2 = (cx + bw / 2) / detScale;
-      const y2 = (cy + bh / 2) / detScale;
+      const x1 = (cx - bw / 2) / detScaleX;
+      const y1 = (cy - bh / 2) / detScaleY;
+      const x2 = (cx + bw / 2) / detScaleX;
+      const y2 = (cy + bh / 2) / detScaleY;
 
       allDets.push(
         Math.max(0, Math.min(origWidth, x1)),
