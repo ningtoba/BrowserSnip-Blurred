@@ -80,6 +80,35 @@ async function* decodeAndYield(
   if (decodeError) throw decodeError;
 }
 
+function extractAvcC(mp4Buf: ArrayBuffer): Uint8Array | null {
+  const buf = new Uint8Array(mp4Buf);
+  try {
+    // Find moov → trak → stbl → stsd → avc1/avc3 → avcC
+    let off = 0;
+    while (off < buf.length - 8) {
+      const size = ((buf[off] << 24) | (buf[off+1] << 16) | (buf[off+2] << 8) | buf[off+3]) >>> 0;
+      const tag = String.fromCharCode(buf[off+4], buf[off+5], buf[off+6], buf[off+7]);
+      if (size < 8 || off + size > buf.length) break;
+      if (tag === 'moov') {
+        // Search for avcC fourCC within the trak/stsd subtree
+        const moovEnd = off + size;
+        for (let i = off + 8; i < moovEnd - 8; i++) {
+          if (buf[i] === 0x61 && buf[i+1] === 0x76 && buf[i+2] === 0x63 && buf[i+3] === 0x43) {
+            // avcC found — read the box
+            const boxSize = ((buf[i-4] << 24) | (buf[i-3] << 16) | (buf[i-2] << 8) | buf[i-1]) >>> 0;
+            if (boxSize > 8 && boxSize < 1000 && i - 4 + boxSize <= moovEnd) {
+              return buf.slice(i + 4, i - 4 + boxSize);
+            }
+          }
+        }
+        break;
+      }
+      off += size;
+    }
+  } catch {}
+  return null;
+}
+
 function demuxWithMP4Box(arrayBuf: ArrayBuffer): Promise<{
   config: VideoDecoderConfig;
   chunks: { data: ArrayBuffer; key: boolean }[];
@@ -93,24 +122,19 @@ function demuxWithMP4Box(arrayBuf: ArrayBuffer): Promise<{
     file.onReady = (info: any) => {
       const track = info.videoTracks?.[0];
       if (!track) { reject(new Error('No video track')); return; }
-      // Dump all track properties
-      const keys = Object.getOwnPropertyNames(track);
-      for (const k of keys) { console.debug('[MP4Box] track prop:', k, '=', typeof track[k]); }
-      // Try to get description through mp4box internal
-      try {
-        const boxes = (file as any).boxes;
-        console.debug('[MP4Box] file boxes:', boxes ? Object.keys(boxes) : 'none');
-      } catch {}
-      // Try alternate ways
-      try {
-        const desc = (file as any).getTrackById?.(track.id)?.description;
-        console.debug('[MP4Box] alt desc:', desc?.length);
-      } catch {}
-      try {
-        const avcCBox = (file as any).moov?.trak?.[0]?.mdia?.minf?.stbl?.stsd?.entries?.[0]?.avcC;
-        console.debug('[MP4Box] avcC box:', avcCBox);
-      } catch {}
       config = { codec: track.codec, codedWidth: track.track_width, codedHeight: track.track_height };
+      // Get avcC from track description or fallback to buffer scan
+      let desc = track.description as Uint8Array | undefined;
+      if (!desc || desc.length === 0) {
+        desc = extractAvcC(arrayBuf);
+        console.debug('[MP4Box] avcC from buffer:', desc?.length, 'bytes');
+      }
+      if (desc && desc.length > 0) {
+        const descBuf = new ArrayBuffer(desc.length);
+        new Uint8Array(descBuf).set(desc);
+        (config as any).description = descBuf;
+        console.debug('[MP4Box] desc set:', descBuf.byteLength, 'bytes');
+      }
       file.setExtractionOptions(track.id, 'video');
       file.start();
       ready = true;
