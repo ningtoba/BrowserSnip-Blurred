@@ -8,7 +8,7 @@ import {
   getVideoMetadata,
 } from '@/lib/video/extract';
 import { decodeFramesWebCodecs } from '@/lib/video/decoder';
-import { clusterFaces, matchDetectionsToIdentities } from '@/lib/engine/clustering';
+import { clusterFaces } from '@/lib/engine/clustering';
 // reconstructVideoRaw inlined for batch processing
 import { detectFaces } from '@/lib/engine/detection';
 import { recognizeFace } from '@/lib/engine/recognition';

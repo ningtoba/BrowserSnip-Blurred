@@ -129,14 +129,16 @@ export async function* decodeFramesWebCodecs(
   if (!spsSample || !ppsSample) throw new Error('SPS/PPS not found in bitstream');
 
   const { config, descBytes } = buildCodecConfig(spsSample.data, ppsSample.data);
+  console.debug('[WebCodecs] codec:', config.codec, 'desc length:', descBytes.length);
 
   // Validate config before using
   const support = await VideoDecoder.isConfigSupported(config);
+  console.debug('[WebCodecs] isConfigSupported:', support.supported);
   if (!support.supported) {
-    console.warn('WebCodecs config not supported, trying fallback codec format');
-    // Try without avcC description — some browsers accept just the codec string
+    // Try without avcC description
     const simpleConfig: VideoDecoderConfig = { codec: config.codec };
     const simpleSupport = await VideoDecoder.isConfigSupported(simpleConfig);
+    console.debug('[WebCodecs] simple config supported:', simpleSupport.supported);
     if (!simpleSupport.supported) {
       throw new Error(`VideoDecoder config not supported for ${config.codec}`);
     }
