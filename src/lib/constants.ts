@@ -16,8 +16,8 @@ export const MAX_DETECTIONS_PER_FRAME = 20;
 export const MODELS: ONNXModelConfig[] = [
   {
     name: 'yunet',
-    url: '/models/face_detection_yunet_2023mar_int8bq.onnx',
-    sizeMB: 0.12,
+    url: '/models/face_detection_yunet_2023mar.onnx',
+    sizeMB: 0.23,
     inputShape: [1, 3, 640, 640],
   },
   {

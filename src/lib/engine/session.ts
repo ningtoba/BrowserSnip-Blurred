@@ -52,7 +52,6 @@ async function createWebGPUSession(modelBuffer: ArrayBuffer): Promise<ort.Infere
     graphOptimizationLevel: 'all',
     enableCpuMemArena: true,
     enableMemPattern: true,
-    preferredOutputLocation: 'gpu-buffer',
     intraOpNumThreads: Math.max(2, navigator.hardwareConcurrency || 4),
   });
 

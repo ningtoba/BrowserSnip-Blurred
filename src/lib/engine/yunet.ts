@@ -140,7 +140,6 @@ export async function detectFacesYuNet(
     const clsOut = results[session.outputNames[idx]];
     const objOut = results[session.outputNames[idx + fmc]];
     const bboxOut = results[session.outputNames[idx + fmc * 2]];
-    const kpsOut = results[session.outputNames[idx + fmc * 3]];
 
     const clsData = (await clsOut.getData()) as Float32Array;
     const objData = (await objOut.getData()) as Float32Array;
@@ -187,7 +186,6 @@ export async function detectFacesYuNet(
     clsOut.dispose();
     objOut.dispose();
     bboxOut.dispose();
-    kpsOut.dispose();
   }
 
   if (allDets.length === 0) return [];
