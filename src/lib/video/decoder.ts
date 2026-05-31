@@ -183,8 +183,15 @@ export async function* decodeFramesWebCodecs(
   signal: AbortSignal
 ): AsyncGenerator<DecodedFrame> {
   const buf = new Uint8Array(await videoFile.arrayBuffer());
+
+  // Check for MP4 (starts with 'ftyp' at offset 4)
+  const isMP4 = buf.length > 8 && buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70;
+  if (!isMP4) {
+    throw new Error('Only MP4 files are supported for hardware decoding. Please convert your video to MP4 (H.264) format for faster processing.');
+  }
+
   const demuxed = demuxMP4(buf);
-  if (!demuxed) throw new Error('Failed to demux MP4 — unsupported format');
+  if (!demuxed) throw new Error('Failed to parse MP4 structure');
 
   const { samples, avcC } = demuxed;
   console.debug(`[WebCodecs] demuxed ${samples.length} samples, avcC: ${avcC.length} bytes`);
