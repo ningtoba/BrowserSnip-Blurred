@@ -172,13 +172,16 @@ export async function extractFramesSeeking(
   for (let ts = 0; ts < duration && frameIndex < totalFrames; ts += frameInterval) {
     if (signal?.aborted) break;
 
+    const tSeek = performance.now();
     video.currentTime = Math.min(ts, duration - 0.001);
     await new Promise<void>((resolve) => {
       video.addEventListener('seeked', () => resolve(), { once: true });
     });
+    const seekMs = performance.now() - tSeek;
 
     ctx.drawImage(video, 0, 0, w, h);
     const imageData = ctx.getImageData(0, 0, w, h);
+    if (frameIndex % 100 === 0) console.debug(`[extract] frame ${frameIndex}: seek=${seekMs.toFixed(1)}ms`);
 
     const keepGoing = await onFrame(imageData, video.currentTime, frameIndex);
     if (!keepGoing) break;

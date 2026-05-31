@@ -226,18 +226,22 @@ const processAndExport = useCallback(async () => {
       let lastBoxes: DetectionBox[] = [];
       let lastMatchMap = new Map<number, number>();
 
+      console.time('total-processing');
+
       await extractFramesSeeking(
         file,
         async (imageData, timestamp, _index) => {
           if (signal.aborted) return false;
 
+          const t0 = performance.now();
           const shouldDetect = globalFrameCount % DETECT_EVERY_N_FRAMES === 0;
           let boxes: DetectionBox[];
           let matchMap: Map<number, number>;
 
           if (shouldDetect) {
+            const tDet = performance.now();
             boxes = await detectFaces(imageData, width, height);
-            // Match via IOU to scan identities — no MFN inference needed
+            console.debug(`[frame ${globalFrameCount}] detectFaces: ${(performance.now() - tDet).toFixed(1)}ms, found ${boxes.length} faces`);
             matchMap = matchToIdentitiesByIOU(boxes, scanDetections, identities, timestamp);
             lastBoxes = boxes;
             lastMatchMap = matchMap;
@@ -253,12 +257,16 @@ const processAndExport = useCallback(async () => {
 
           let outputData = imageData;
           if (targetIndices.size > 0) {
+            const tBlur = performance.now();
             outputData = await applyBlurToFrame(imageData, boxes, targetIndices, blurConfig.type);
+            console.debug(`[frame ${globalFrameCount}] blur: ${(performance.now() - tBlur).toFixed(1)}ms`);
           }
 
-          // Write raw RGBA — no PNG encoding overhead
+          const tWrite = performance.now();
           const rawName = `frame_${String(globalFrameCount + 1).padStart(4, '0')}.rgba`;
           await ffmpeg.writeFile(rawName, new Uint8Array(outputData.data.buffer, outputData.data.byteOffset, outputData.data.byteLength));
+          const writeMs = performance.now() - tWrite;
+          console.debug(`[frame ${globalFrameCount}] total: ${(performance.now() - t0).toFixed(1)}ms (write: ${writeMs.toFixed(1)}ms)`);
 
           globalFrameCount++;
 
@@ -274,6 +282,8 @@ const processAndExport = useCallback(async () => {
         },
         signal,
       );
+
+      console.timeEnd('total-processing');
 
       if (signal.aborted) return;
 
