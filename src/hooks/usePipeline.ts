@@ -80,12 +80,12 @@ export function usePipeline() {
 
         if (signal.aborted) return;
 
-        // Detect + recognize in one pass to minimize GPU context switches
         setPhase('detecting-faces');
         const allDetections: FaceDetection[] = [];
         for (let i = 0; i < sampleFrames.length; i++) {
           if (signal.aborted) return;
           const boxes = await detectFaces(sampleFrames[i], meta.width, meta.height);
+          console.debug(`[scan] frame ${i}: ${boxes.length} faces, boxes:`, boxes.map(b => `(${b.x1.toFixed(0)},${b.y1.toFixed(0)} ${b.x2.toFixed(0)},${b.y2.toFixed(0)} conf=${b.confidence.toFixed(2)})`).join(', '));
           for (const box of boxes) {
             allDetections.push({ ...box, frameIndex: i, frameTimestamp: sampleTimestamps[i] });
           }

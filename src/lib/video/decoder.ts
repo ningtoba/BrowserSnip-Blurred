@@ -146,19 +146,24 @@ export async function* decodeFramesWebCodecs(
 
   decoder.configure(config);
 
-  // Feed NAL units as individual frames (one slice per frame is standard)
+  // Feed NAL units as individual frames
   let timestamp = 0;
   const frameIntervalUs = 33_333;
 
   for (const sample of samples) {
     if (signal.aborted) break;
     if (sample.type === 'sps' || sample.type === 'pps') continue;
+    if (sample.data.length === 0) continue;
+
+    // Create a detached ArrayBuffer copy to avoid shared-buffer issues
+    const chunkBuf = new ArrayBuffer(sample.data.length);
+    new Uint8Array(chunkBuf).set(sample.data);
 
     decoder.decode(new EncodedVideoChunk({
       type: sample.type === 'idr' ? 'key' : 'delta',
       timestamp,
       duration: frameIntervalUs,
-      data: sample.data.buffer as AllowSharedBufferSource,
+      data: chunkBuf,
     }));
     timestamp += frameIntervalUs;
   }
