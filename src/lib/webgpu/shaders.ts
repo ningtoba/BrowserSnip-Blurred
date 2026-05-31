@@ -101,63 +101,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
-// Variant using texture_external for zero-copy import from video element
-export const NORMALIZE_CHW_EXTERNAL_SHADER = /* wgsl */ `
-@group(0) @binding(0) var inputTex: texture_external;
-@group(0) @binding(1) var texSampler: sampler;
-@group(0) @binding(2) var outputBuf: storage, read_write;
-
-struct NormalizeParams {
-  srcW: f32,
-  srcH: f32,
-  dstW: f32,
-  dstH: f32,
-  scale: f32,
-  padLeft: f32,
-  padTop: f32,
-  meanR: f32,
-  meanG: f32,
-  meanB: f32,
-  stdR: f32,
-  stdG: f32,
-  stdB: f32,
-};
-
-@group(0) @binding(3) var<uniform> params: NormalizeParams;
-
-@compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let x = gid.x;
-  let y = gid.y;
-
-  if (x >= u32(params.dstW) || y >= u32(params.dstH)) { return; }
-
-  let planeSize = u32(params.dstW) * u32(params.dstH);
-
-  let srcX = (f32(x) - params.padLeft) / params.scale;
-  let srcY = (f32(y) - params.padTop) / params.scale;
-
-  var color = vec4f(0.447, 0.447, 0.447, 1.0);
-
-  if (srcX >= 0.0 && srcX < params.srcW && srcY >= 0.0 && srcY < params.srcH) {
-    let uv = vec2f(srcX / params.srcW, srcY / params.srcH);
-    color = textureSampleBaseClampToEdge(inputTex, texSampler, uv);
-  }
-
-  let r = (color.r - params.meanR / 255.0) / (params.stdR / 255.0);
-  let g = (color.g - params.meanG / 255.0) / (params.stdG / 255.0);
-  let b = (color.b - params.meanB / 255.0) / (params.stdB / 255.0);
-
-  outputBuf[y * u32(params.dstW) + x] = f32(r);
-  outputBuf[planeSize + y * u32(params.dstW) + x] = f32(g);
-  outputBuf[2u * planeSize + y * u32(params.dstW) + x] = f32(b);
-}
-`;
-
 export const NORMALIZE_CHW_SHADER = /* wgsl */ `
 @group(0) @binding(0) var inputTex: texture_2d<f32>;
 @group(0) @binding(1) var texSampler: sampler;
-@group(0) @binding(2) var outputBuf: storage, read_write;
+@group(0) @binding(2) var<storage, read_write> outputBuf: array<f32>;
 
 struct NormalizeParams {
   srcW: f32,

@@ -1,34 +1,23 @@
 import * as ort from 'onnxruntime-web';
-import { getGPUDevice, usesOrtDevice } from '@/lib/webgpu/context';
+import { getGPUDevice } from '@/lib/webgpu/context';
 import { NORMALIZE_CHW_SHADER } from '@/lib/webgpu/shaders';
 import { YOLO_INPUT_SIZE, FACE_INPUT_SIZE } from '@/lib/constants';
 
-let yoloPipeline: GPUComputePipeline | null = null;
-let mfnPipeline: GPUComputePipeline | null = null;
+let pipeline: GPUComputePipeline | null = null;
 let sampler: GPUSampler | null = null;
 
-async function ensurePipelines(dev: GPUDevice): Promise<void> {
-  if (!yoloPipeline) {
+async function ensurePipeline(dev: GPUDevice): Promise<GPUComputePipeline> {
+  if (!pipeline) {
     const mod = dev.createShaderModule({ code: NORMALIZE_CHW_SHADER });
-    yoloPipeline = dev.createComputePipeline({
+    pipeline = dev.createComputePipeline({
       layout: 'auto',
       compute: { module: mod, entryPoint: 'main' },
     });
   }
   if (!sampler) {
-    sampler = dev.createSampler({
-      magFilter: 'linear',
-      minFilter: 'linear',
-    });
+    sampler = dev.createSampler({ magFilter: 'linear', minFilter: 'linear' });
   }
-}
-
-interface NormalizeParams {
-  srcW: number; srcH: number;
-  dstW: number; dstH: number;
-  scale: number; padLeft: number; padTop: number;
-  meanR: number; meanG: number; meanB: number;
-  stdR: number; stdG: number; stdB: number;
+  return pipeline;
 }
 
 function letterboxParams(
@@ -49,16 +38,15 @@ async function runNormalizeShader(
   dstW: number,
   dstH: number,
   normParams: { mean: [number, number, number]; std: [number, number, number] }
-): Promise<{ gpuBuffer: GPUBuffer; scale: number; padLeft: number; padTop: number }> {
+): Promise<Float32Array> {
   const dev = await getGPUDevice();
-  if (!dev) throw new Error('GPU preprocessing unavailable');
-  await ensurePipelines(dev);
+  if (!dev) throw new Error('GPU not available');
 
+  const pipe = await ensurePipeline(dev);
   const srcW = imageData.width;
   const srcH = imageData.height;
   const { scale, padLeft, padTop } = letterboxParams(srcW, srcH, dstW, dstH);
 
-  // Upload input ImageData to GPU texture
   const inputTex = dev.createTexture({
     size: [srcW, srcH],
     format: 'rgba8unorm',
@@ -71,14 +59,12 @@ async function runNormalizeShader(
     [srcW, srcH],
   );
 
-  // Output buffer: CHW float32 layout
-  const outputSize = dstW * dstH * 3 * 4; // 3 channels × float32
+  const outputSize = dstW * dstH * 3 * 4;
   const outputBuf = dev.createBuffer({
     size: outputSize,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
   });
 
-  // Uniform params
   const paramsData = new Float32Array([
     srcW, srcH, dstW, dstH, scale, padLeft, padTop,
     normParams.mean[0], normParams.mean[1], normParams.mean[2],
@@ -91,7 +77,7 @@ async function runNormalizeShader(
   dev.queue.writeBuffer(paramsBuf, 0, paramsData);
 
   const bindGroup = dev.createBindGroup({
-    layout: yoloPipeline!.getBindGroupLayout(0),
+    layout: pipe.getBindGroupLayout(0),
     entries: [
       { binding: 0, resource: inputTex.createView() },
       { binding: 1, resource: sampler! },
@@ -102,7 +88,7 @@ async function runNormalizeShader(
 
   const encoder = dev.createCommandEncoder();
   const pass = encoder.beginComputePass();
-  pass.setPipeline(yoloPipeline!);
+  pass.setPipeline(pipe);
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(Math.ceil(dstW / 16), Math.ceil(dstH / 16));
   pass.end();
@@ -111,7 +97,22 @@ async function runNormalizeShader(
   inputTex.destroy();
   paramsBuf.destroy();
 
-  return { gpuBuffer: outputBuf, scale, padLeft, padTop };
+  // Read back result from GPU
+  const readBuf = dev.createBuffer({
+    size: outputSize,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const readEncoder = dev.createCommandEncoder();
+  readEncoder.copyBufferToBuffer(outputBuf, 0, readBuf, 0, outputSize);
+  dev.queue.submit([readEncoder.finish()]);
+  outputBuf.destroy();
+
+  await readBuf.mapAsync(GPUMapMode.READ);
+  const result = new Float32Array(readBuf.getMappedRange().slice(0));
+  readBuf.unmap();
+  readBuf.destroy();
+
+  return result;
 }
 
 export async function preprocessYOLO(
@@ -122,74 +123,25 @@ export async function preprocessYOLO(
   padLeft: number;
   padTop: number;
 }> {
-  const { gpuBuffer, scale, padLeft, padTop } = await runNormalizeShader(
-    imageData,
-    YOLO_INPUT_SIZE,
-    YOLO_INPUT_SIZE,
-    { mean: [0, 0, 0], std: [255, 255, 255] },  // normalize to [0, 1]
+  const { scale, padLeft, padTop } = letterboxParams(
+    imageData.width, imageData.height, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE,
   );
-
-  let tensor: ort.Tensor;
-  if (usesOrtDevice()) {
-    tensor = ort.Tensor.fromGpuBuffer(gpuBuffer, {
-      dataType: 'float32',
-      dims: [1, 3, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE],
-      dispose: () => gpuBuffer.destroy(),
-    });
-  } else {
-    // Own device — must read back to CPU
-    const dev = (await getGPUDevice())!;
-    const size = YOLO_INPUT_SIZE * YOLO_INPUT_SIZE * 3 * 4;
-    const readBuf = dev.createBuffer({
-      size,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
-    const encoder = dev.createCommandEncoder();
-    encoder.copyBufferToBuffer(gpuBuffer, 0, readBuf, 0, size);
-    dev.queue.submit([encoder.finish()]);
-    await readBuf.mapAsync(GPUMapMode.READ);
-    const data = new Float32Array(readBuf.getMappedRange().slice(0));
-    readBuf.unmap();
-    readBuf.destroy();
-    gpuBuffer.destroy();
-    tensor = new ort.Tensor('float32', data, [1, 3, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE]);
-  }
-
-  return { tensor, scale, padLeft, padTop };
+  const data = await runNormalizeShader(
+    imageData, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE,
+    { mean: [0, 0, 0], std: [255, 255, 255] },
+  );
+  return {
+    tensor: new ort.Tensor('float32', data, [1, 3, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE]),
+    scale, padLeft, padTop,
+  };
 }
 
 export async function preprocessMFN(
   faceImageData: ImageData
 ): Promise<ort.Tensor> {
-  const { gpuBuffer } = await runNormalizeShader(
-    faceImageData,
-    FACE_INPUT_SIZE,
-    FACE_INPUT_SIZE,
-    { mean: [127.5, 127.5, 127.5], std: [127.5, 127.5, 127.5] },  // MFN: (pixel - 127.5) / 127.5
+  const data = await runNormalizeShader(
+    faceImageData, FACE_INPUT_SIZE, FACE_INPUT_SIZE,
+    { mean: [127.5, 127.5, 127.5], std: [127.5, 127.5, 127.5] },
   );
-
-  if (usesOrtDevice()) {
-    return ort.Tensor.fromGpuBuffer(gpuBuffer, {
-      dataType: 'float32',
-      dims: [1, 3, FACE_INPUT_SIZE, FACE_INPUT_SIZE],
-      dispose: () => gpuBuffer.destroy(),
-    });
-  }
-
-  // Own device — read back to CPU
-  const dev = (await getGPUDevice())!;
-  const size = FACE_INPUT_SIZE * FACE_INPUT_SIZE * 3 * 4;
-  const readBuf = dev.createBuffer({
-    size,
-    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-  });
-  const encoder = dev.createCommandEncoder();
-  encoder.copyBufferToBuffer(gpuBuffer, 0, readBuf, 0, size);
-  dev.queue.submit([encoder.finish()]);
-  await readBuf.mapAsync(GPUMapMode.READ);
-  const data = new Float32Array(readBuf.getMappedRange().slice(0));
-  readBuf.unmap();
-  readBuf.destroy();
-  gpuBuffer.destroy();
   return new ort.Tensor('float32', data, [1, 3, FACE_INPUT_SIZE, FACE_INPUT_SIZE]);
 }
