@@ -174,11 +174,11 @@ export async function* decodeFramesWebCodecs(
 
   decoder.configure(config);
 
-  // Feed NAL units in length-prefixed format (avcC mode)
-  // Each chunk: 4-byte BE length + NAL data (no start code)
+  // Feed NAL units in batches, yielding to event loop so decoder can process
   let timestamp = 0;
   const frameIntervalUs = 33_333;
   let foundKeyframe = false;
+  let batchCount = 0;
 
   for (const sample of samples) {
     if (signal.aborted) break;
@@ -188,28 +188,54 @@ export async function* decodeFramesWebCodecs(
     if (!foundKeyframe && sample.type !== 'idr') continue;
     foundKeyframe = true;
 
-    // 4-byte big-endian length prefix + NAL data
     const nalLen = sample.data.length;
     const chunkBuf = new ArrayBuffer(4 + nalLen);
     const view = new DataView(chunkBuf);
-    view.setUint32(0, nalLen, false); // big-endian
+    view.setUint32(0, nalLen, false);
     new Uint8Array(chunkBuf, 4).set(sample.data);
 
-    decoder.decode(new EncodedVideoChunk({
-      type: sample.type === 'idr' ? 'key' : 'delta',
-      timestamp,
-      duration: frameIntervalUs,
-      data: chunkBuf,
-    }));
+    try {
+      decoder.decode(new EncodedVideoChunk({
+        type: sample.type === 'idr' ? 'key' : 'delta',
+        timestamp,
+        duration: frameIntervalUs,
+        data: chunkBuf,
+      }));
+    } catch (e) {
+      // Queue full — wait for it to drain
+      await new Promise(r => setTimeout(r, 50));
+      decoder.decode(new EncodedVideoChunk({
+        type: sample.type === 'idr' ? 'key' : 'delta',
+        timestamp,
+        duration: frameIntervalUs,
+        data: chunkBuf,
+      }));
+    }
     timestamp += frameIntervalUs;
+
+    // Yield to event loop every 30 chunks so decoder can process
+    if (++batchCount % 30 === 0) {
+      await new Promise(r => setTimeout(r, 0));
+      if (decodeError) throw decodeError;
+    }
   }
 
   if (!foundKeyframe) throw new Error('No keyframe found in bitstream');
   if (decodeError) throw decodeError;
 
-  console.debug(`[WebCodecs] ${timestamp / frameIntervalUs} chunks sent, flushing...`);
-  await decoder.flush();
-  console.debug(`[WebCodecs] flush done, ${frameQueue.length} frames decoded`);
+  console.debug(`[WebCodecs] ${Math.round(timestamp / frameIntervalUs)} chunks sent, flushing...`);
+
+  // Flush with timeout
+  const flushResult = await Promise.race([
+    decoder.flush().then(() => 'ok'),
+    new Promise<string>(r => setTimeout(() => r('timeout'), 30000)),
+  ]);
+  console.debug(`[WebCodecs] flush: ${flushResult}, ${frameQueue.length} frames decoded`);
+
+  if (flushResult === 'timeout') {
+    decoder.close();
+    throw new Error('Decoder flush timed out after 30s');
+  }
 
   if (frameQueue.length === 0) {
     decoder.close();
