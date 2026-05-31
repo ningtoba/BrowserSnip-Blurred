@@ -12,8 +12,8 @@ import { reconstructVideo } from '@/lib/video/reconstruct';
 import { detectFaces } from '@/lib/engine/detection';
 import { recognizeFace } from '@/lib/engine/recognition';
 import { applyBlurToFrame } from '@/lib/engine/blur';
-import { SAMPLE_FPS, PHASE_WEIGHTS, BATCH_SIZE } from '@/lib/constants';
-import type { FaceDetection, FaceIdentity, PipelinePhase } from '@/types';
+import { SAMPLE_FPS, PHASE_WEIGHTS, BATCH_SIZE, DETECT_EVERY_N_FRAMES, DETECTION_CONFIDENCE } from '@/lib/constants';
+import type { FaceDetection, DetectionBox, FaceIdentity, PipelinePhase } from '@/types';
 import { getFFmpeg } from '@/lib/ffmpeg/core';
 
 function computeOverallPercent(phase: PipelinePhase, phasePercent: number): number {
@@ -178,6 +178,8 @@ export function usePipeline() {
       const ffmpeg = await getFFmpeg();
 
       let globalFrameCount = 0;
+      let lastBoxes: DetectionBox[] = [];
+      let lastDetections: FaceDetection[] = [];
       const offscreen = new OffscreenCanvas(metadata.width, metadata.height);
       const offCtx = offscreen.getContext('2d')!;
 
@@ -186,14 +188,28 @@ export function usePipeline() {
         async (imageData, _timestamp, _index) => {
           if (signal.aborted) return false;
 
-          const boxes = await detectFaces(imageData, metadata.width, metadata.height);
-          const detections: FaceDetection[] = boxes.map((box, di) => ({
-            ...box, frameIndex: di, frameTimestamp: _timestamp,
-          }));
+          const shouldDetect = globalFrameCount % DETECT_EVERY_N_FRAMES === 0;
+          let boxes: DetectionBox[];
+          let detections: FaceDetection[];
 
-          for (const det of detections) {
-            const emb = await recognizeFace(imageData, det, metadata.width, metadata.height);
-            if (emb) det.embedding = emb;
+          if (shouldDetect) {
+            boxes = await detectFaces(imageData, metadata.width, metadata.height);
+            detections = boxes.map((box, di) => ({
+              ...box, frameIndex: di, frameTimestamp: _timestamp,
+            }));
+
+            for (const det of detections) {
+              const emb = await recognizeFace(imageData, det, metadata.width, metadata.height);
+              if (emb) det.embedding = emb;
+            }
+
+            lastBoxes = boxes;
+            lastDetections = detections;
+          } else {
+            boxes = lastBoxes.map((b) => ({ ...b }));
+            detections = lastDetections.map((d) => ({
+              ...d, frameIndex: globalFrameCount, frameTimestamp: _timestamp,
+            }));
           }
 
           const matchMap = matchDetectionsToIdentities(detections, identities);
@@ -204,7 +220,7 @@ export function usePipeline() {
 
           let outputData = imageData;
           if (targetIndices.size > 0) {
-            outputData = applyBlurToFrame(imageData, boxes, targetIndices, blurConfig.type);
+            outputData = await applyBlurToFrame(imageData, boxes, targetIndices, blurConfig.type);
           }
 
           const pngName = `frame_${String(globalFrameCount + 1).padStart(4, '0')}.png`;

@@ -9,6 +9,7 @@ export const FACE_INPUT_SIZE = 112;
 export const YOLO_INPUT_SIZE = 640;
 export const PIXELATE_BLOCK_SIZE = 15;
 export const BATCH_SIZE = 300;
+export const DETECT_EVERY_N_FRAMES = 2;
 export const MAX_DETECTIONS_PER_FRAME = 20;
 
 export const MODELS: ONNXModelConfig[] = [

@@ -125,11 +125,15 @@ export function getBackend(name: ModelName): 'webgpu' | 'wasm' | null {
   return sessions.get(name)?.backend ?? null;
 }
 
-export async function runYOLO(input: Float32Array): Promise<DetectionBox[]> {
+export async function runYOLO(
+  input: Float32Array | ort.Tensor
+): Promise<DetectionBox[]> {
   const entry = sessions.get('yolo');
   if (!entry) throw new Error('YOLO session not initialized');
 
-  const tensor = new ort.Tensor('float32', input, [1, 3, 640, 640]);
+  const tensor: ort.Tensor = input instanceof ort.Tensor
+    ? input
+    : new ort.Tensor('float32', input as Float32Array, [1, 3, 640, 640]);
   const feeds: Record<string, ort.Tensor> = {};
   feeds[entry.session.inputNames[0]] = tensor;
 

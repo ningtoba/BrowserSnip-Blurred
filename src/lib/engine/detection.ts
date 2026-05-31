@@ -1,22 +1,53 @@
-import { imageDataToRGB, rgbToFloat32CHW, letterboxImageData } from '@/lib/utils/image';
+import * as ort from 'onnxruntime-web';
 import { runYOLO } from '@/lib/engine/session';
 import { YOLO_INPUT_SIZE, MAX_DETECTIONS_PER_FRAME } from '@/lib/constants';
 import type { DetectionBox } from '@/types';
 
-export function preprocessYOLO(
+function letterboxCanvas(
+  imageData: ImageData,
+  targetW: number,
+  targetH: number
+): { canvas: OffscreenCanvas; scale: number; padLeft: number; padTop: number } {
+  const sw = imageData.width;
+  const sh = imageData.height;
+  const scale = Math.min(targetW / sw, targetH / sh);
+  const newW = Math.round(sw * scale);
+  const newH = Math.round(sh * scale);
+  const padLeft = Math.floor((targetW - newW) / 2);
+  const padTop = Math.floor((targetH - newH) / 2);
+
+  const canvas = new OffscreenCanvas(targetW, targetH);
+  const ctx = canvas.getContext('2d')!;
+
+  ctx.fillStyle = 'rgb(114, 114, 114)';
+  ctx.fillRect(0, 0, targetW, targetH);
+
+  const src = new OffscreenCanvas(sw, sh);
+  src.getContext('2d')!.putImageData(imageData, 0, 0);
+  ctx.drawImage(src, padLeft, padTop, newW, newH);
+
+  return { canvas, scale, padLeft, padTop };
+}
+
+async function preprocessYOLO(
   imageData: ImageData
-): { tensor: Float32Array; scale: number; padLeft: number; padTop: number } {
-  const { data: letterboxed, scale, padLeft, padTop } = letterboxImageData(
+): Promise<{ tensor: ort.Tensor; scale: number; padLeft: number; padTop: number }> {
+  const { canvas, scale, padLeft, padTop } = letterboxCanvas(
     imageData,
     YOLO_INPUT_SIZE,
     YOLO_INPUT_SIZE,
-    114,
-    114,
-    114
   );
 
-  const rgb = imageDataToRGB(letterboxed);
-  const tensor = rgbToFloat32CHW(rgb, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE);
+  const bitmap = await createImageBitmap(canvas);
+
+  const tensor = await ort.Tensor.fromImage(bitmap, {
+    dataType: 'float32',
+    tensorFormat: 'RGB',
+    tensorLayout: 'NCHW',
+    norm: { bias: 0, mean: 255 },
+  });
+
+  bitmap.close();
 
   return { tensor, scale, padLeft, padTop };
 }
@@ -55,7 +86,8 @@ export async function detectFaces(
   origWidth: number,
   origHeight: number
 ): Promise<DetectionBox[]> {
-  const { tensor, scale, padLeft, padTop } = preprocessYOLO(imageData);
+  const { tensor, scale, padLeft, padTop } = await preprocessYOLO(imageData);
   const boxes = await runYOLO(tensor);
+  tensor.dispose();
   return postprocessYOLO(boxes, origWidth, origHeight, scale, padLeft, padTop);
 }
