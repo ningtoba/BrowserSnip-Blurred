@@ -4,7 +4,12 @@ import { MODELS, DETECTION_CONFIDENCE } from '@/lib/constants';
 
 type ModelName = 'yolo' | 'mfn';
 
-const sessions = new Map<ModelName, ort.InferenceSession>();
+interface SessionEntry {
+  session: ort.InferenceSession;
+  backend: 'webgpu' | 'wasm';
+}
+
+const sessions = new Map<ModelName, SessionEntry>();
 const loading = new Map<ModelName, Promise<void>>();
 
 ort.env.wasm.numThreads = Math.max(2, navigator.hardwareConcurrency || 4);
@@ -15,34 +20,72 @@ function getConfig(name: ModelName) {
   return config;
 }
 
+export function hasWebGPU(): boolean {
+  return typeof navigator.gpu !== 'undefined';
+}
+
 async function fetchModelBuffer(url: string): Promise<ArrayBuffer> {
   const response = await fetch(url);
-
   if (!response.ok) {
     throw new Error(
       `Model file not found at ${url}. Place the ONNX model in public/models/. ` +
-      `See README.md for instructions on obtaining the required models.`
+      `See README.md for instructions.`
     );
   }
-
-  const contentType = response.headers.get('content-type') || '';
-  if (contentType.includes('text/html')) {
-    throw new Error(
-      `Model file not found at ${url} (received HTML instead of binary). ` +
-      `Place the ONNX model in public/models/. See README.md.`
-    );
-  }
-
   const buffer = await response.arrayBuffer();
-
   if (buffer.byteLength < 1024) {
     throw new Error(
-      `File at ${url} is too small (${buffer.byteLength} bytes) to be an ONNX model. ` +
-      `Ensure you have placed the actual ONNX file, not a placeholder.`
+      `File at ${url} is too small (${buffer.byteLength} bytes) to be an ONNX model.`
     );
   }
-
   return buffer;
+}
+
+async function createWebGPUSession(modelBuffer: ArrayBuffer, inputShape: number[]): Promise<ort.InferenceSession> {
+  const session = await ort.InferenceSession.create(modelBuffer, {
+    executionProviders: [
+      {
+        name: 'webgpu',
+        validationMode: 'disabled',
+      },
+    ],
+    graphOptimizationLevel: 'all',
+    enableCpuMemArena: true,
+    enableMemPattern: true,
+    enableGraphCapture: true,
+    preferredOutputLocation: 'gpu-buffer',
+    intraOpNumThreads: Math.max(2, navigator.hardwareConcurrency || 4),
+  });
+
+  // Warm up: compile shaders and cache compute pipelines
+  const inputSize = inputShape.reduce((a, b) => a * b, 1);
+  const dummyData = new Float32Array(inputSize);
+  const dummyTensor = new ort.Tensor('float32', dummyData, inputShape);
+  const feeds: Record<string, ort.Tensor> = {};
+  feeds[session.inputNames[0]] = dummyTensor;
+  await session.run(feeds);
+
+  return session;
+}
+
+async function createWasmSession(modelBuffer: ArrayBuffer, inputShape: number[]): Promise<ort.InferenceSession> {
+  const session = await ort.InferenceSession.create(modelBuffer, {
+    executionProviders: ['wasm'],
+    graphOptimizationLevel: 'all',
+    enableCpuMemArena: true,
+    enableMemPattern: true,
+    intraOpNumThreads: Math.max(2, navigator.hardwareConcurrency || 4),
+  });
+
+  // Warm up
+  const inputSize = inputShape.reduce((a, b) => a * b, 1);
+  const dummyData = new Float32Array(inputSize);
+  const dummyTensor = new ort.Tensor('float32', dummyData, inputShape);
+  const feeds: Record<string, ort.Tensor> = {};
+  feeds[session.inputNames[0]] = dummyTensor;
+  await session.run(feeds);
+
+  return session;
 }
 
 export async function initSession(name: ModelName): Promise<void> {
@@ -53,15 +96,24 @@ export async function initSession(name: ModelName): Promise<void> {
   const promise = (async () => {
     const buffer = await fetchModelBuffer(config.url);
 
-    const session = await ort.InferenceSession.create(buffer, {
-      executionProviders: ['webgpu'],
-      graphOptimizationLevel: 'all',
-      enableCpuMemArena: true,
-      enableMemPattern: true,
-      intraOpNumThreads: Math.max(2, navigator.hardwareConcurrency || 4),
-    });
+    let session: ort.InferenceSession;
+    let backend: 'webgpu' | 'wasm';
 
-    sessions.set(name, session);
+    if (hasWebGPU()) {
+      try {
+        session = await createWebGPUSession(buffer, config.inputShape);
+        backend = 'webgpu';
+      } catch (err) {
+        console.warn(`WebGPU init failed for ${name}, falling back to WASM:`, err);
+        session = await createWasmSession(buffer, config.inputShape);
+        backend = 'wasm';
+      }
+    } else {
+      session = await createWasmSession(buffer, config.inputShape);
+      backend = 'wasm';
+    }
+
+    sessions.set(name, { session, backend });
   })();
 
   loading.set(name, promise);
@@ -69,33 +121,37 @@ export async function initSession(name: ModelName): Promise<void> {
   loading.delete(name);
 }
 
+export function getBackend(name: ModelName): 'webgpu' | 'wasm' | null {
+  return sessions.get(name)?.backend ?? null;
+}
+
 export async function runYOLO(input: Float32Array): Promise<DetectionBox[]> {
-  const session = sessions.get('yolo');
-  if (!session) throw new Error('YOLO session not initialized');
+  const entry = sessions.get('yolo');
+  if (!entry) throw new Error('YOLO session not initialized');
 
   const tensor = new ort.Tensor('float32', input, [1, 3, 640, 640]);
   const feeds: Record<string, ort.Tensor> = {};
-  feeds[session.inputNames[0]] = tensor;
+  feeds[entry.session.inputNames[0]] = tensor;
 
-  const results = await session.run(feeds);
-  const output = results[session.outputNames[0]];
+  const results = await entry.session.run(feeds);
+  const output = results[entry.session.outputNames[0]];
 
-  const data = output.data as Float32Array;
+  const data = await output.getData();
+  const floatData = data as Float32Array;
   const dims = output.dims;
+  output.dispose();
 
   const numDetections = dims[1];
   const boxes: DetectionBox[] = [];
 
   for (let i = 0; i < numDetections; i++) {
     const offset = i * 6;
-    const x1 = data[offset];
-    const y1 = data[offset + 1];
-    const x2 = data[offset + 2];
-    const y2 = data[offset + 3];
-    const confidence = data[offset + 4];
-
+    const x1 = floatData[offset];
+    const y1 = floatData[offset + 1];
+    const x2 = floatData[offset + 2];
+    const y2 = floatData[offset + 3];
+    const confidence = floatData[offset + 4];
     if (confidence < DETECTION_CONFIDENCE) continue;
-
     boxes.push({ x1, y1, x2, y2, confidence });
   }
 
@@ -103,17 +159,21 @@ export async function runYOLO(input: Float32Array): Promise<DetectionBox[]> {
 }
 
 export async function runMFN(input: Float32Array): Promise<Float32Array> {
-  const session = sessions.get('mfn');
-  if (!session) throw new Error('MFN session not initialized');
+  const entry = sessions.get('mfn');
+  if (!entry) throw new Error('MFN session not initialized');
 
   const tensor = new ort.Tensor('float32', input, [1, 3, 112, 112]);
   const feeds: Record<string, ort.Tensor> = {};
-  feeds[session.inputNames[0]] = tensor;
+  feeds[entry.session.inputNames[0]] = tensor;
 
-  const results = await session.run(feeds);
-  const output = results[session.outputNames[0]];
+  const results = await entry.session.run(feeds);
+  const output = results[entry.session.outputNames[0]];
 
-  return new Float32Array(output.data as Float32Array);
+  const data = await output.getData();
+  const floatData = new Float32Array(data as Float32Array);
+  output.dispose();
+
+  return floatData;
 }
 
 export function isReady(name: ModelName): boolean {
@@ -121,8 +181,8 @@ export function isReady(name: ModelName): boolean {
 }
 
 export async function disposeAll(): Promise<void> {
-  for (const [, session] of sessions) {
-    session.release();
+  for (const [, entry] of sessions) {
+    entry.session.release();
   }
   sessions.clear();
   loading.clear();

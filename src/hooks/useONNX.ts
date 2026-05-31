@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
-import { initSession, isReady, disposeAll } from '@/lib/engine/session';
+import { initSession, disposeAll, hasWebGPU, getBackend } from '@/lib/engine/session';
 import { MODELS } from '@/lib/constants';
 
 interface ONNXState {
-  webGPUSupported: boolean;
+  gpuAccelerated: boolean;
   modelsReady: boolean;
   loadingMessage: string;
   loadingPercent: number;
@@ -11,22 +11,23 @@ interface ONNXState {
 
 export function useONNX(): ONNXState {
   const [state, setState] = useState<ONNXState>({
-    webGPUSupported: typeof navigator.gpu !== 'undefined',
+    gpuAccelerated: hasWebGPU(),
     modelsReady: false,
-    loadingMessage: 'Checking WebGPU support...',
+    loadingMessage: hasWebGPU()
+      ? 'Checking WebGPU support...'
+      : 'WebGPU not available, using CPU fallback...',
     loadingPercent: 0,
   });
 
   const loadModels = useCallback(async () => {
-    if (!state.webGPUSupported) return;
-
     const totalModels = MODELS.length;
     let loaded = 0;
 
     for (const model of MODELS) {
+      const modelLabel = model.name === 'yolo' ? 'face detection' : 'face recognition';
       setState((s) => ({
         ...s,
-        loadingMessage: `Downloading ${model.name === 'yolo' ? 'face detection' : 'face recognition'} model (${model.sizeMB} MB)...`,
+        loadingMessage: `Downloading ${modelLabel} model (${model.sizeMB} MB)...`,
         loadingPercent: (loaded / totalModels) * 60,
       }));
 
@@ -47,9 +48,13 @@ export function useONNX(): ONNXState {
       }));
     }
 
+    const yoloBackend = getBackend('yolo');
     setState((s) => ({
       ...s,
-      loadingMessage: 'Initializing WebGPU inference engine...',
+      gpuAccelerated: yoloBackend === 'webgpu',
+      loadingMessage: yoloBackend === 'webgpu'
+        ? 'Initializing WebGPU inference engine...'
+        : 'Initializing CPU inference engine (slower)...',
       loadingPercent: 80,
     }));
 
@@ -61,7 +66,7 @@ export function useONNX(): ONNXState {
       loadingPercent: 100,
       modelsReady: true,
     }));
-  }, [state.webGPUSupported]);
+  }, []);
 
   useEffect(() => {
     loadModels();

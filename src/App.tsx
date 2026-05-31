@@ -2,7 +2,7 @@ import { useFileStore } from '@/stores/file-store';
 import { useProcessStore } from '@/stores/process-store';
 import { useUIStore } from '@/stores/ui-store';
 import { LoadingScreen } from '@/components/ui/LoadingScreen';
-import { WebGPUBanner } from '@/components/ui/WebGPUBanner';
+
 import { FileDropZone } from '@/components/ui/FileDropZone';
 import { VideoPreview } from '@/components/player/VideoPreview';
 import { ProgressBar } from '@/components/ui/ProgressBar';
@@ -22,11 +22,7 @@ export default function App() {
   const isProcessing = useProcessStore((s) => s.isProcessing);
   const showLogMonitor = useUIStore((s) => s.showLogMonitor);
   const toggleLogMonitor = useUIStore((s) => s.toggleLogMonitor);
-  const { webGPUSupported, modelsReady, loadingMessage, loadingPercent } = useONNX();
-
-  if (!webGPUSupported) {
-    return <WebGPUBanner />;
-  }
+  const { gpuAccelerated, modelsReady, loadingMessage, loadingPercent } = useONNX();
 
   if (!modelsReady) {
     return (
@@ -66,6 +62,19 @@ export default function App() {
 
       <main className="flex-1 overflow-y-auto">
         <div className="max-w-2xl mx-auto px-4 py-6 space-y-6">
+          {!gpuAccelerated && (
+            <div className="rounded-md p-3 text-xs border border-warn/20 bg-warn/5 text-warn animate-slide-up flex items-start gap-2">
+              <svg className="w-4 h-4 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+              </svg>
+              <div>
+                <p className="font-medium">Running on CPU — WebGPU not available</p>
+                <p className="mt-0.5 text-warn/70">
+                  Inference will be 3-6x slower. For best performance, use Chrome 113+ or Edge 113+.
+                </p>
+              </div>
+            </div>
+          )}
           {!file && <FileDropZone />}
 
           {file && (
