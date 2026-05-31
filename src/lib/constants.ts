@@ -1,7 +1,7 @@
 import type { ONNXModelConfig, PipelinePhase } from '@/types';
 
 export const SAMPLE_FPS = 1;
-export const CLUSTER_SIMILARITY_THRESHOLD = 0.45;
+export const CLUSTER_SIMILARITY_THRESHOLD = 0.55;
 export const FACE_EXPAND_RATIO = 0.2;
 export const FACE_INPUT_SIZE = 112;
 export const YUNET_INPUT_SIZE = 640;

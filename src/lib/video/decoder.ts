@@ -62,22 +62,22 @@ function parseAnnexB(buffer: Uint8Array): H264Sample[] {
 }
 
 function buildCodecConfig(sps: Uint8Array, pps: Uint8Array): VideoDecoderConfig {
-  // Build avcC description: https://www.w3.org/TR/webcodecs-avc-codec-registration/
-  const desc = new Uint8Array(7 + sps.length + 1 + 2 + pps.length);
+  // avcC: 8 bytes header + sps + 3 bytes pps header + pps
+  const desc = new Uint8Array(8 + sps.length + 3 + pps.length);
   desc[0] = 1;       // configurationVersion
   desc[1] = sps[1];  // AVCProfileIndication
   desc[2] = sps[2];  // profile_compatibility
   desc[3] = sps[3];  // AVCLevelIndication
-  desc[4] = 0xff;    // lengthSizeMinusOne | reserved
-  desc[5] = 0xe1;    // numOfSequenceParameterSets | reserved
+  desc[4] = 0xff;    // lengthSizeMinusOne=3 | reserved
+  desc[5] = 0xe1;    // numOfSequenceParameterSets=1 | reserved
   desc[6] = (sps.length >> 8) & 0xff;
   desc[7] = sps.length & 0xff;
   desc.set(sps, 8);
-  const ppsOffset = 8 + sps.length;
-  desc[ppsOffset] = 1; // numOfPictureParameterSets
-  desc[ppsOffset + 1] = (pps.length >> 8) & 0xff;
-  desc[ppsOffset + 2] = pps.length & 0xff;
-  desc.set(pps, ppsOffset + 3);
+  const ppsOff = 8 + sps.length;
+  desc[ppsOff] = 1;  // numOfPictureParameterSets
+  desc[ppsOff + 1] = (pps.length >> 8) & 0xff;
+  desc[ppsOff + 2] = pps.length & 0xff;
+  desc.set(pps, ppsOff + 3);
 
   return {
     codec: 'avc1.' + [
@@ -146,73 +146,21 @@ export async function* decodeFramesWebCodecs(
 
   decoder.configure(config);
 
-  // Feed all NAL units as chunks, grouping non-IDR after an IDR
-  let currentChunkType: EncodedVideoChunkType = 'key';
-  let chunkData: Uint8Array[] = [];
+  // Feed NAL units as individual frames (one slice per frame is standard)
   let timestamp = 0;
-  const frameIntervalUs = 33_333; // ~30fps
+  const frameIntervalUs = 33_333;
 
   for (const sample of samples) {
     if (signal.aborted) break;
-
     if (sample.type === 'sps' || sample.type === 'pps') continue;
 
-    if (sample.type === 'idr') {
-      // Flush previous chunk
-      if (chunkData.length > 0) {
-        const totalLen = chunkData.reduce((s, d) => s + d.length, 0);
-        const merged = new Uint8Array(totalLen);
-        let offset = 0;
-        for (const d of chunkData) { merged.set(d, offset); offset += d.length; }
-        decoder.decode(new EncodedVideoChunk({
-          type: currentChunkType,
-          timestamp,
-          duration: frameIntervalUs,
-          data: merged.buffer as AllowSharedBufferSource,
-        }));
-        chunkData = [];
-        timestamp += frameIntervalUs;
-      }
-      currentChunkType = 'key';
-      chunkData.push(sample.data);
-      // Also include subsequent non-IDR up to the next IDR or slice
-    } else if (chunkData.length > 0) {
-      // Check if this is a new frame (first slice of a new picture)
-      const nalType = sample.data[0] & 0x1f;
-      const isSlice = nalType === 1 || nalType === 5;
-      const isFirstSlice = isSlice && (sample.data[1] & 0x80);
-
-      if (isSlice && isFirstSlice && chunkData.length > 0) {
-        // Flush as a new delta frame
-        const totalLen = chunkData.reduce((s, d) => s + d.length, 0);
-        const merged = new Uint8Array(totalLen);
-        let offset = 0;
-        for (const d of chunkData) { merged.set(d, offset); offset += d.length; }
-        decoder.decode(new EncodedVideoChunk({
-          type: 'delta',
-          timestamp,
-          duration: frameIntervalUs,
-          data: merged.buffer as AllowSharedBufferSource,
-        }));
-        chunkData = [];
-        timestamp += frameIntervalUs;
-      }
-      chunkData.push(sample.data);
-    }
-  }
-
-  // Flush remaining
-  if (chunkData.length > 0) {
-    const totalLen = chunkData.reduce((s, d) => s + d.length, 0);
-    const merged = new Uint8Array(totalLen);
-    let offset = 0;
-    for (const d of chunkData) { merged.set(d, offset); offset += d.length; }
     decoder.decode(new EncodedVideoChunk({
-      type: currentChunkType,
+      type: sample.type === 'idr' ? 'key' : 'delta',
       timestamp,
       duration: frameIntervalUs,
-      data: merged.buffer as AllowSharedBufferSource,
+      data: sample.data.buffer as AllowSharedBufferSource,
     }));
+    timestamp += frameIntervalUs;
   }
 
   await decoder.flush();
