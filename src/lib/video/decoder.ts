@@ -61,32 +61,33 @@ function parseAnnexB(buffer: Uint8Array): H264Sample[] {
   return samples;
 }
 
-function buildCodecConfig(sps: Uint8Array, pps: Uint8Array): VideoDecoderConfig {
-  // avcC: 8 bytes header + sps + 3 bytes pps header + pps
+function buildCodecConfig(sps: Uint8Array, pps: Uint8Array): { config: VideoDecoderConfig; descBytes: Uint8Array } {
   const desc = new Uint8Array(8 + sps.length + 3 + pps.length);
-  desc[0] = 1;       // configurationVersion
-  desc[1] = sps[1];  // AVCProfileIndication
-  desc[2] = sps[2];  // profile_compatibility
-  desc[3] = sps[3];  // AVCLevelIndication
-  desc[4] = 0xff;    // lengthSizeMinusOne=3 | reserved
-  desc[5] = 0xe1;    // numOfSequenceParameterSets=1 | reserved
+  desc[0] = 1;
+  desc[1] = sps[1];
+  desc[2] = sps[2];
+  desc[3] = sps[3];
+  desc[4] = 0xff;
+  desc[5] = 0xe1;
   desc[6] = (sps.length >> 8) & 0xff;
   desc[7] = sps.length & 0xff;
   desc.set(sps, 8);
-  const ppsOff = 8 + sps.length;
-  desc[ppsOff] = 1;  // numOfPictureParameterSets
-  desc[ppsOff + 1] = (pps.length >> 8) & 0xff;
-  desc[ppsOff + 2] = pps.length & 0xff;
-  desc.set(pps, ppsOff + 3);
+  const off = 8 + sps.length;
+  desc[off] = 1;
+  desc[off + 1] = (pps.length >> 8) & 0xff;
+  desc[off + 2] = pps.length & 0xff;
+  desc.set(pps, off + 3);
 
-  return {
-    codec: 'avc1.' + [
-      sps[1].toString(16).padStart(2, '0'),
-      sps[2].toString(16).padStart(2, '0'),
-      sps[3].toString(16).padStart(2, '0'),
-    ].join(''),
-    description: desc.buffer as AllowSharedBufferSource,
-  };
+  const codec = 'avc1.' +
+    sps[1].toString(16).padStart(2, '0') +
+    sps[2].toString(16).padStart(2, '0') +
+    sps[3].toString(16).padStart(2, '0');
+
+  // Copy to a standalone ArrayBuffer (not backed by the Uint8Array)
+  const buf = new ArrayBuffer(desc.length);
+  new Uint8Array(buf).set(desc);
+
+  return { config: { codec, description: buf }, descBytes: desc };
 }
 
 export async function* decodeFramesWebCodecs(
@@ -127,12 +128,24 @@ export async function* decodeFramesWebCodecs(
   const ppsSample = samples.find((s) => s.type === 'pps');
   if (!spsSample || !ppsSample) throw new Error('SPS/PPS not found in bitstream');
 
-  const config = buildCodecConfig(spsSample.data, ppsSample.data);
+  const { config, descBytes } = buildCodecConfig(spsSample.data, ppsSample.data);
+
+  // Validate config before using
+  const support = await VideoDecoder.isConfigSupported(config);
+  if (!support.supported) {
+    console.warn('WebCodecs config not supported, trying fallback codec format');
+    // Try without avcC description — some browsers accept just the codec string
+    const simpleConfig: VideoDecoderConfig = { codec: config.codec };
+    const simpleSupport = await VideoDecoder.isConfigSupported(simpleConfig);
+    if (!simpleSupport.supported) {
+      throw new Error(`VideoDecoder config not supported for ${config.codec}`);
+    }
+    config.description = undefined;
+  }
 
   // Prepare frames for decoding
   let frameIndex = 0;
   const frameQueue: VideoFrame[] = [];
-  let decodeDone = false;
   let decodeError: Error | null = null;
 
   const decoder = new VideoDecoder({

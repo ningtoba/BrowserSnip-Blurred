@@ -7,6 +7,7 @@ import {
   extractFramesSeeking,
   getVideoMetadata,
 } from '@/lib/video/extract';
+import { decodeFramesWebCodecs } from '@/lib/video/decoder';
 import { clusterFaces, matchDetectionsToIdentities } from '@/lib/engine/clustering';
 // reconstructVideoRaw inlined for batch processing
 import { detectFaces } from '@/lib/engine/detection';
@@ -253,12 +254,37 @@ const processAndExport = useCallback(async () => {
 
       console.time('total-processing');
 
-      await extractFramesSeeking(file, async (imageData, timestamp) => {
+      // WebCodecs primary, seek-based fallback
+      const useWebCodecs = typeof VideoDecoder !== 'undefined';
+      if (useWebCodecs) {
+        try {
+          for await (const { imageData, timestamp } of decodeFramesWebCodecs(file, signal)) {
+            await processFrame(imageData, timestamp);
+          }
+        } catch (err) {
+          console.warn('WebCodecs failed, falling back to seek-based:', err instanceof Error ? err.message : err);
+          useProcessStore.getState().appendLog('WebCodecs failed — using software decoding (slower)');
+          // Clean partial JPEGs and reset state
+          for (let f = 1; f <= globalFrameCount; f++) {
+            try { await ffmpeg.deleteFile(`frame_${String(f).padStart(4, '0')}.jpg`); } catch { /* ignore */ }
+          }
+          globalFrameCount = 0;
+          lastBoxes = []; prevBoxes = [];
+          lastMatchMap = new Map(); lastDetFrame = 0;
+          await extractFramesSeeking(file, async (imageData, timestamp) => {
+            if (signal.aborted) return false;
+            await processFrame(imageData, timestamp);
+            return true;
+          }, signal);
+        }
+      } else {
+        useProcessStore.getState().appendLog('WebCodecs not available — using software decoding');
+        await extractFramesSeeking(file, async (imageData, timestamp) => {
           if (signal.aborted) return false;
-
           await processFrame(imageData, timestamp);
           return true;
-      }, signal);
+        }, signal);
+      }
 
       async function processFrame(imageData: ImageData, timestamp: number) {
           if (signal.aborted) return;

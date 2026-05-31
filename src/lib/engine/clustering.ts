@@ -35,6 +35,18 @@ class UnionFind {
   }
 }
 
+function bboxIOU(a: FaceDetection, b: FaceDetection): number {
+  const x1 = Math.max(a.x1, b.x1);
+  const y1 = Math.max(a.y1, b.y1);
+  const x2 = Math.min(a.x2, b.x2);
+  const y2 = Math.min(a.y2, b.y2);
+  if (x2 <= x1 || y2 <= y1) return 0;
+  const inter = (x2 - x1) * (y2 - y1);
+  const areaA = (a.x2 - a.x1) * (a.y2 - a.y1);
+  const areaB = (b.x2 - b.x1) * (b.y2 - b.y1);
+  return inter / (areaA + areaB - inter);
+}
+
 export function clusterFaces(detections: FaceDetection[]): FaceIdentity[] {
   const validDetections = detections.filter((d) => d.embedding);
   if (validDetections.length === 0) return [];
@@ -44,7 +56,14 @@ export function clusterFaces(detections: FaceDetection[]): FaceIdentity[] {
 
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
+      // Never merge faces from the same frame — they're different people
       if (validDetections[i].frameIndex === validDetections[j].frameIndex) continue;
+
+      // Spatial constraint: faces must plausibly be in the same region
+      // to be the same person across frames. If their bboxes never overlap,
+      // they occupy different parts of the frame and must be different people.
+      const iou = bboxIOU(validDetections[i], validDetections[j]);
+      if (iou === 0) continue;
 
       const sim = cosineSimilarity(
         validDetections[i].embedding!,
