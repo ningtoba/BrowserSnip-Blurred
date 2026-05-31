@@ -351,8 +351,29 @@ const processAndExport = useCallback(async () => {
         600_000
       );
 
-      const data = await ffmpeg.readFile('output.mp4');
-      setOutput(new Blob([data], { type: 'video/mp4' }), URL.createObjectURL(new Blob([data], { type: 'video/mp4' })));
+      // Mux original audio into output video
+      try {
+        const inputBuf = await file.arrayBuffer();
+        await ffmpeg.writeFile('input.mp4', new Uint8Array(inputBuf));
+        await ffmpeg.exec(
+          [
+            '-i', 'output.mp4', '-i', 'input.mp4',
+            '-c:v', 'copy', '-c:a', 'aac',
+            '-map', '0:v:0', '-map', '1:a:0?',
+            '-movflags', '+faststart',
+            'final.mp4',
+          ],
+          120_000
+        );
+        const finalData = await ffmpeg.readFile('final.mp4');
+        setOutput(new Blob([finalData], { type: 'video/mp4' }), URL.createObjectURL(new Blob([finalData], { type: 'video/mp4' })));
+        try { await ffmpeg.deleteFile('input.mp4'); } catch { /* ignore */ }
+        try { await ffmpeg.deleteFile('final.mp4'); } catch { /* ignore */ }
+      } catch {
+        // Audio mux failed — use video-only output
+        const data = await ffmpeg.readFile('output.mp4');
+        setOutput(new Blob([data], { type: 'video/mp4' }), URL.createObjectURL(new Blob([data], { type: 'video/mp4' })));
+      }
 
       // Clean up JPEG frames
       for (let f = 1; f <= globalFrameCount; f++) {
