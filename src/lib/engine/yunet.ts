@@ -1,30 +1,15 @@
 import * as ort from 'onnxruntime-web';
 import type { DetectionBox } from '@/types';
 import { YUNET_INPUT_SIZE, YUNET_CONF_THRESHOLD, YUNET_NMS_THRESHOLD, YUNET_TOP_K } from '@/lib/constants';
+import { getGPUDevice } from '@/lib/webgpu/context';
 
 const STRIDES = [8, 16, 32];
-const INPUT_MEAN = 127.5;
-const INPUT_STD = 128.0;
-
-function generateGridCenters(h: number, w: number, stride: number): Float32Array {
-  const n = h * w;
-  const centers = new Float32Array(n * 2);
-  let idx = 0;
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      centers[idx * 2] = x;
-      centers[idx * 2 + 1] = y;
-      idx++;
-    }
-  }
-  return centers;
-}
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
-function nmsYunet(dets: Float32Array, thresh: number): number[] {
+function nms(dets: Float32Array, thresh: number): number[] {
   const n = dets.length / 5;
   if (n === 0) return [];
 
@@ -87,6 +72,26 @@ function nmsYunet(dets: Float32Array, thresh: number): number[] {
   return keep;
 }
 
+async function preprocessCPU(imageData: ImageData): Promise<Float32Array> {
+  const mw = YUNET_INPUT_SIZE;
+  const planeSize = mw * mw;
+  const chw = new Float32Array(3 * planeSize);
+
+  // RGB channel order, raw pixel values (matching OpenCV blobFromImage with scale=1.0, mean=Scalar(), swapRB=true)
+  for (let i = 0; i < planeSize; i++) {
+    chw[i] = imageData.data[i * 4];                     // R
+    chw[planeSize + i] = imageData.data[i * 4 + 1];     // G
+    chw[2 * planeSize + i] = imageData.data[i * 4 + 2]; // B
+  }
+
+  return chw;
+}
+
+async function preprocessGPU(imageData: ImageData): Promise<Float32Array> {
+  const { preprocessCHW } = await import('@/lib/webgpu/preprocess');
+  return preprocessCHW(imageData, YUNET_INPUT_SIZE, YUNET_INPUT_SIZE);
+}
+
 export async function detectFacesYuNet(
   imageData: ImageData,
   origWidth: number,
@@ -98,37 +103,27 @@ export async function detectFacesYuNet(
   const modelW = YUNET_INPUT_SIZE;
   const modelH = YUNET_INPUT_SIZE;
 
-  // Letterbox: resize preserving aspect ratio, pad to model input size
-  const imRatio = origHeight / origWidth;
-  let newW: number, newH: number;
-  if (imRatio > 1) {
-    newH = modelH;
-    newW = Math.round(newH / imRatio);
-  } else {
-    newW = modelW;
-    newH = Math.round(newW * imRatio);
-  }
-  const detScale = newH / origHeight;
-
-  // Create padded canvas
-  const canvas = new OffscreenCanvas(modelW, modelH);
-  const ctx = canvas.getContext('2d')!;
-  ctx.fillStyle = 'rgb(0, 0, 0)';
-  ctx.fillRect(0, 0, modelW, modelH);
-
+  // Direct resize to 640×640 (matching OpenCV FaceDetectorYN resize behavior)
   const src = new OffscreenCanvas(origWidth, origHeight);
   src.getContext('2d')!.putImageData(imageData, 0, 0);
-  ctx.drawImage(src, 0, 0, newW, newH);
+  const dst = new OffscreenCanvas(modelW, modelH);
+  const dstCtx = dst.getContext('2d')!;
+  dstCtx.drawImage(src, 0, 0, modelW, modelH);
+  const resized = dstCtx.getImageData(0, 0, modelW, modelH);
 
-  const inputImageData = ctx.getImageData(0, 0, modelW, modelH);
+  const detScale = modelH / origHeight;
 
-  // BGR normalize + CHW: (pixel - 127.5) / 128.0
-  const chw = new Float32Array(3 * modelW * modelH);
-  const planeSize = modelW * modelH;
-  for (let i = 0; i < planeSize; i++) {
-    chw[2 * planeSize + i] = (inputImageData.data[i * 4] - INPUT_MEAN) / INPUT_STD;     // R→B
-    chw[planeSize + i] = (inputImageData.data[i * 4 + 1] - INPUT_MEAN) / INPUT_STD;      // G→G
-    chw[i] = (inputImageData.data[i * 4 + 2] - INPUT_MEAN) / INPUT_STD;                  // B→R
+  // Preprocess: RGB CHW with raw pixel values
+  let chw: Float32Array;
+  const gpuDev = await getGPUDevice();
+  if (gpuDev) {
+    try {
+      chw = await preprocessGPU(resized);
+    } catch {
+      chw = await preprocessCPU(resized);
+    }
+  } else {
+    chw = await preprocessCPU(resized);
   }
 
   const tensor = new ort.Tensor('float32', chw, [1, 3, modelH, modelW]);
@@ -150,7 +145,6 @@ export async function detectFacesYuNet(
     const clsData = (await clsOut.getData()) as Float32Array;
     const objData = (await objOut.getData()) as Float32Array;
     const bboxData = (await bboxOut.getData()) as Float32Array;
-    const kpsData = (await kpsOut.getData()) as Float32Array;
 
     const h = Math.floor(modelH / stride);
     const w = Math.floor(modelW / stride);
@@ -166,7 +160,6 @@ export async function detectFacesYuNet(
       const col = i % w;
       const row = Math.floor(i / w);
 
-      // Decode bbox: center + log_size → (x1, y1, w, h)
       const dx = bboxData[i * 4];
       const dy = bboxData[i * 4 + 1];
       const dw = bboxData[i * 4 + 2];
@@ -183,10 +176,10 @@ export async function detectFacesYuNet(
       const y2 = (cy + bh / 2) / detScale;
 
       allDets.push(
-        Math.max(0, x1),
-        Math.max(0, y1),
-        Math.min(origWidth, x2),
-        Math.min(origHeight, y2),
+        Math.max(0, Math.min(origWidth, x1)),
+        Math.max(0, Math.min(origHeight, y1)),
+        Math.max(0, Math.min(origWidth, x2)),
+        Math.max(0, Math.min(origHeight, y2)),
         score,
       );
     }
@@ -199,7 +192,6 @@ export async function detectFacesYuNet(
 
   if (allDets.length === 0) return [];
 
-  // Sort by score descending
   const detArr = new Float32Array(allDets);
   const sortOrder = Array.from({ length: detArr.length / 5 }, (_, i) => i);
   sortOrder.sort((a, b) => detArr[b * 5 + 4] - detArr[a * 5 + 4]);
@@ -215,7 +207,7 @@ export async function detectFacesYuNet(
     sorted[dst + 4] = detArr[src + 4];
   }
 
-  const keep = nmsYunet(sorted, YUNET_NMS_THRESHOLD);
+  const keep = nms(sorted, YUNET_NMS_THRESHOLD);
 
   const result = keep.map((i) => ({
     x1: sorted[i * 5],
@@ -225,10 +217,5 @@ export async function detectFacesYuNet(
     confidence: sorted[i * 5 + 4],
   }));
 
-  // Limit to top K
-  if (result.length > YUNET_TOP_K) {
-    return result.slice(0, YUNET_TOP_K);
-  }
-
-  return result;
+  return result.length > YUNET_TOP_K ? result.slice(0, YUNET_TOP_K) : result;
 }

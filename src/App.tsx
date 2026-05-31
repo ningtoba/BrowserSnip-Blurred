@@ -96,6 +96,24 @@ export default function App() {
                 </div>
               )}
 
+              {phase === 'waiting-selection' && identities.length === 0 && (
+                <div className="doodle-section space-y-3 text-center animate-fade-in">
+                  <p className="text-sm text-ink-soft">No faces detected in this video</p>
+                  <p className="text-[11px] text-ink-muted">
+                    Try a different video with clearer faces, or trim to a section where faces are visible.
+                  </p>
+                  <button
+                    onClick={() => {
+                      useProcessStore.getState().reset();
+                      useFileStore.getState().reset();
+                    }}
+                    className="doodle-btn-secondary text-xs"
+                  >
+                    Try Another Video
+                  </button>
+                </div>
+              )}
+
               {showOutput && <OutputActions />}
             </>
           )}

@@ -115,6 +115,19 @@ async function runNormalizeShader(
   return result;
 }
 
+export async function preprocessCHW(
+  imageData: ImageData,
+  dstW: number,
+  dstH: number
+): Promise<Float32Array> {
+  // srcW==dstW and srcH==dstH: already resized, just do CHW conversion
+  // mean=[0,0,0], std=[1,1,1] → raw pixel values [0,255] matching OpenCV blobFromImage
+  return runNormalizeShader(
+    imageData, dstW, dstH,
+    { mean: [0, 0, 0], std: [1, 1, 1] },
+  );
+}
+
 export async function preprocessYuNet(
   imageData: ImageData
 ): Promise<{
