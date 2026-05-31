@@ -1,5 +1,5 @@
 import * as ort from 'onnxruntime-web';
-import { getGPUDevice } from '@/lib/webgpu/context';
+import { getGPUDevice, usesOrtDevice } from '@/lib/webgpu/context';
 import { NORMALIZE_CHW_SHADER } from '@/lib/webgpu/shaders';
 import { YOLO_INPUT_SIZE, FACE_INPUT_SIZE } from '@/lib/constants';
 
@@ -129,11 +129,31 @@ export async function preprocessYOLO(
     { mean: [0, 0, 0], std: [255, 255, 255] },  // normalize to [0, 1]
   );
 
-  const tensor = ort.Tensor.fromGpuBuffer(gpuBuffer, {
-    dataType: 'float32',
-    dims: [1, 3, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE],
-    dispose: () => gpuBuffer.destroy(),
-  });
+  let tensor: ort.Tensor;
+  if (usesOrtDevice()) {
+    tensor = ort.Tensor.fromGpuBuffer(gpuBuffer, {
+      dataType: 'float32',
+      dims: [1, 3, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE],
+      dispose: () => gpuBuffer.destroy(),
+    });
+  } else {
+    // Own device — must read back to CPU
+    const dev = (await getGPUDevice())!;
+    const size = YOLO_INPUT_SIZE * YOLO_INPUT_SIZE * 3 * 4;
+    const readBuf = dev.createBuffer({
+      size,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = dev.createCommandEncoder();
+    encoder.copyBufferToBuffer(gpuBuffer, 0, readBuf, 0, size);
+    dev.queue.submit([encoder.finish()]);
+    await readBuf.mapAsync(GPUMapMode.READ);
+    const data = new Float32Array(readBuf.getMappedRange().slice(0));
+    readBuf.unmap();
+    readBuf.destroy();
+    gpuBuffer.destroy();
+    tensor = new ort.Tensor('float32', data, [1, 3, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE]);
+  }
 
   return { tensor, scale, padLeft, padTop };
 }
@@ -148,11 +168,28 @@ export async function preprocessMFN(
     { mean: [127.5, 127.5, 127.5], std: [127.5, 127.5, 127.5] },  // MFN: (pixel - 127.5) / 127.5
   );
 
-  const tensor = ort.Tensor.fromGpuBuffer(gpuBuffer, {
-    dataType: 'float32',
-    dims: [1, 3, FACE_INPUT_SIZE, FACE_INPUT_SIZE],
-    dispose: () => gpuBuffer.destroy(),
-  });
+  if (usesOrtDevice()) {
+    return ort.Tensor.fromGpuBuffer(gpuBuffer, {
+      dataType: 'float32',
+      dims: [1, 3, FACE_INPUT_SIZE, FACE_INPUT_SIZE],
+      dispose: () => gpuBuffer.destroy(),
+    });
+  }
 
-  return tensor;
+  // Own device — read back to CPU
+  const dev = (await getGPUDevice())!;
+  const size = FACE_INPUT_SIZE * FACE_INPUT_SIZE * 3 * 4;
+  const readBuf = dev.createBuffer({
+    size,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const encoder = dev.createCommandEncoder();
+  encoder.copyBufferToBuffer(gpuBuffer, 0, readBuf, 0, size);
+  dev.queue.submit([encoder.finish()]);
+  await readBuf.mapAsync(GPUMapMode.READ);
+  const data = new Float32Array(readBuf.getMappedRange().slice(0));
+  readBuf.unmap();
+  readBuf.destroy();
+  gpuBuffer.destroy();
+  return new ort.Tensor('float32', data, [1, 3, FACE_INPUT_SIZE, FACE_INPUT_SIZE]);
 }

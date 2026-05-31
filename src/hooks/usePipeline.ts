@@ -4,7 +4,6 @@ import { useProcessStore } from '@/stores/process-store';
 import {
   generateSampleTimestamps,
   extractFramesAtTimestamps,
-  extractFramesStreaming,
   extractFramesZeroCopy,
   getVideoMetadata,
 } from '@/lib/video/extract';

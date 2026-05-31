@@ -1,4 +1,4 @@
-import { getGPUDevice } from '@/lib/webgpu/context';
+import { getGPUDevice, usesOrtDevice } from '@/lib/webgpu/context';
 import { NORMALIZE_CHW_EXTERNAL_SHADER } from '@/lib/webgpu/shaders';
 import { YOLO_INPUT_SIZE } from '@/lib/constants';
 import * as ort from 'onnxruntime-web';
@@ -85,11 +85,29 @@ export async function preprocessFromVideoElement(
 
   paramsBuf.destroy();
 
-  const tensor = ort.Tensor.fromGpuBuffer(outputBuf, {
-    dataType: 'float32',
-    dims: [1, 3, dstW, dstH],
-    dispose: () => outputBuf.destroy(),
-  });
+  let tensor: ort.Tensor;
+  if (usesOrtDevice()) {
+    tensor = ort.Tensor.fromGpuBuffer(outputBuf, {
+      dataType: 'float32',
+      dims: [1, 3, dstW, dstH],
+      dispose: () => outputBuf.destroy(),
+    });
+  } else {
+    const size = dstW * dstH * 3 * 4;
+    const readBuf = dev.createBuffer({
+      size,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const enc = dev.createCommandEncoder();
+    enc.copyBufferToBuffer(outputBuf, 0, readBuf, 0, size);
+    dev.queue.submit([enc.finish()]);
+    await readBuf.mapAsync(GPUMapMode.READ);
+    const data = new Float32Array(readBuf.getMappedRange().slice(0));
+    readBuf.unmap();
+    readBuf.destroy();
+    outputBuf.destroy();
+    tensor = new ort.Tensor('float32', data, [1, 3, dstW, dstH]);
+  }
 
   return { tensor, scale, padLeft, padTop };
 }

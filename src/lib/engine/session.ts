@@ -52,7 +52,6 @@ async function createWebGPUSession(modelBuffer: ArrayBuffer, inputShape: number[
     graphOptimizationLevel: 'all',
     enableCpuMemArena: true,
     enableMemPattern: true,
-    enableGraphCapture: true,
     preferredOutputLocation: 'gpu-buffer',
     intraOpNumThreads: Math.max(2, navigator.hardwareConcurrency || 4),
   });
