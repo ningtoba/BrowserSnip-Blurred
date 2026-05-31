@@ -48,7 +48,7 @@ export async function extractFramesAtTimestamps(
   const total = timestamps.length;
   const frames: ImageData[] = [];
   const canvas = new OffscreenCanvas(video.videoWidth, video.videoHeight);
-  const ctx = canvas.getContext('2d')!;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
 
   for (let i = 0; i < total; i++) {
     if (signal?.aborted) break;
@@ -91,7 +91,7 @@ export async function extractFramesStreaming(
   const w = video.videoWidth;
   const h = video.videoHeight;
   const canvas = new OffscreenCanvas(w, h);
-  const ctx = canvas.getContext('2d')!;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
 
   let frameIndex = 0;
   let stopped = false;
@@ -139,6 +139,55 @@ export async function extractFramesStreaming(
   video.remove();
 
   return result;
+}
+
+export async function extractFramesSeeking(
+  videoFile: File,
+  onFrame: (imageData: ImageData, timestamp: number, index: number) => Promise<boolean>,
+  signal?: AbortSignal
+): Promise<number> {
+  const video = document.createElement('video');
+  video.preload = 'auto';
+  video.muted = true;
+  video.crossOrigin = 'anonymous';
+
+  const url = URL.createObjectURL(videoFile);
+  video.src = url;
+
+  await new Promise<void>((resolve, reject) => {
+    video.addEventListener('loadedmetadata', () => resolve(), { once: true });
+    video.addEventListener('error', () => reject(new Error('Failed to load video')), { once: true });
+    video.load();
+  });
+
+  const w = video.videoWidth;
+  const h = video.videoHeight;
+  const duration = video.duration;
+  const canvas = new OffscreenCanvas(w, h);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+  const frameInterval = 1 / 30;
+  const totalFrames = Math.ceil(duration / frameInterval);
+
+  let frameIndex = 0;
+  for (let ts = 0; ts < duration && frameIndex < totalFrames; ts += frameInterval) {
+    if (signal?.aborted) break;
+
+    video.currentTime = Math.min(ts, duration - 0.001);
+    await new Promise<void>((resolve) => {
+      video.addEventListener('seeked', () => resolve(), { once: true });
+    });
+
+    ctx.drawImage(video, 0, 0, w, h);
+    const imageData = ctx.getImageData(0, 0, w, h);
+
+    const keepGoing = await onFrame(imageData, video.currentTime, frameIndex);
+    if (!keepGoing) break;
+    frameIndex++;
+  }
+
+  URL.revokeObjectURL(url);
+  video.remove();
+  return frameIndex;
 }
 
 let lastProgressUpdate = 0;

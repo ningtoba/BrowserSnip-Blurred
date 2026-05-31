@@ -63,7 +63,7 @@ export async function processAndWriteBatch(
   const canvas = document.createElement('canvas');
   canvas.width = origWidth;
   canvas.height = origHeight;
-  const ctx = canvas.getContext('2d')!;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
 
   let frameCount = 0;
   const total = timestamps.length;

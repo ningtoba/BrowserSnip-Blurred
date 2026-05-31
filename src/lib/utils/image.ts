@@ -47,7 +47,7 @@ export function resizeImageData(
   targetH: number
 ): ImageData {
   const canvas = new OffscreenCanvas(targetW, targetH);
-  const ctx = canvas.getContext('2d')!;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   const srcCanvas = new OffscreenCanvas(source.width, source.height);
   const srcCtx = srcCanvas.getContext('2d')!;
   srcCtx.putImageData(source, 0, 0);
@@ -72,7 +72,7 @@ export function letterboxImageData(
   const padTop = Math.floor((targetH - newH) / 2);
 
   const canvas = new OffscreenCanvas(targetW, targetH);
-  const ctx = canvas.getContext('2d')!;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   ctx.fillStyle = `rgb(${fillR},${fillG},${fillB})`;
   ctx.fillRect(0, 0, targetW, targetH);
 
@@ -97,7 +97,7 @@ export function cropImageData(
   h: number
 ): ImageData {
   const canvas = new OffscreenCanvas(w, h);
-  const ctx = canvas.getContext('2d')!;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   const srcCanvas = new OffscreenCanvas(source.width, source.height);
   const srcCtx = srcCanvas.getContext('2d')!;
   srcCtx.putImageData(source, 0, 0);

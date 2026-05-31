@@ -107,7 +107,7 @@ export async function detectFacesYuNet(
   const src = new OffscreenCanvas(origWidth, origHeight);
   src.getContext('2d')!.putImageData(imageData, 0, 0);
   const dst = new OffscreenCanvas(modelW, modelH);
-  const dstCtx = dst.getContext('2d')!;
+  const dstCtx = dst.getContext('2d', { willReadFrequently: true })!;
   dstCtx.drawImage(src, 0, 0, modelW, modelH);
   const resized = dstCtx.getImageData(0, 0, modelW, modelH);
 

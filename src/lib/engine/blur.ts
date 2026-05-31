@@ -134,7 +134,7 @@ export async function applyBlurToFrame(
   const w = sourceImageData.width;
   const h = sourceImageData.height;
   const canvas = new OffscreenCanvas(w, h);
-  const ctx = canvas.getContext('2d')!;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   ctx.putImageData(sourceImageData, 0, 0);
 
   for (const idx of targetIndices) {

@@ -4,7 +4,7 @@ import { useProcessStore } from '@/stores/process-store';
 import {
   generateSampleTimestamps,
   extractFramesAtTimestamps,
-  extractFramesStreaming,
+  extractFramesSeeking,
   getVideoMetadata,
 } from '@/lib/video/extract';
 import { clusterFaces, matchDetectionsToIdentities } from '@/lib/engine/clustering';
@@ -226,7 +226,7 @@ const processAndExport = useCallback(async () => {
       let lastBoxes: DetectionBox[] = [];
       let lastMatchMap = new Map<number, number>();
 
-      await extractFramesStreaming(
+      await extractFramesSeeking(
         file,
         async (imageData, timestamp, _index) => {
           if (signal.aborted) return false;
