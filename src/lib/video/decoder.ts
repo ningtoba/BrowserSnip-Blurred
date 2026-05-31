@@ -29,8 +29,20 @@ function findBox(buf: Uint8Array, type: string, start: number, end: number): { o
 
 function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array; width: number; height: number } | null {
   try {
+    // Log top-level boxes
+    const topBoxes: string[] = [];
+    let scanOff = 0;
+    while (scanOff < Math.min(buf.length, 200) - 8) {
+      const sz = readUint32(buf, scanOff);
+      const tg = String.fromCharCode(buf[scanOff + 4], buf[scanOff + 5], buf[scanOff + 6], buf[scanOff + 7]);
+      if (sz <= 0 || scanOff + sz > buf.length) break;
+      topBoxes.push(tg + ':' + sz);
+      scanOff += sz;
+    }
+    console.debug('[demux] top-level boxes:', topBoxes.join(', '), '| file size:', (buf.length / 1024 / 1024).toFixed(1), 'MB');
+
     const moov = findBox(buf, 'moov', 0, buf.length);
-    if (!moov) { console.debug('[demux] moov not found'); return null; }
+    if (!moov) { console.debug('[demux] moov not found in', buf.length, 'bytes'); return null; }
 
     const moovEnd = moov.offset + moov.size;
     let trakOff = moov.offset;
