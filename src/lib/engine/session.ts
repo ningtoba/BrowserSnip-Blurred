@@ -10,6 +10,7 @@ interface SessionEntry {
 
 const sessions = new Map<ModelName, SessionEntry>();
 const loading = new Map<ModelName, Promise<void>>();
+let generation = 0;
 
 ort.env.wasm.numThreads = Math.max(2, navigator.hardwareConcurrency || 4);
 
@@ -23,8 +24,8 @@ export function hasWebGPU(): boolean {
   return typeof navigator.gpu !== 'undefined';
 }
 
-async function fetchModelBuffer(url: string): Promise<ArrayBuffer> {
-  const response = await fetch(url);
+async function fetchModelBuffer(url: string, signal: AbortSignal): Promise<ArrayBuffer> {
+  const response = await fetch(url, { signal });
   if (!response.ok) {
     throw new Error(
       `Model file not found at ${url}. Place the ONNX model in public/models/. ` +
@@ -40,7 +41,7 @@ async function fetchModelBuffer(url: string): Promise<ArrayBuffer> {
   return buffer;
 }
 
-async function createWebGPUSession(modelBuffer: ArrayBuffer, inputShape: number[]): Promise<ort.InferenceSession> {
+async function createWebGPUSession(modelBuffer: ArrayBuffer): Promise<ort.InferenceSession> {
   const session = await ort.InferenceSession.create(modelBuffer, {
     executionProviders: [
       {
@@ -55,18 +56,10 @@ async function createWebGPUSession(modelBuffer: ArrayBuffer, inputShape: number[
     intraOpNumThreads: Math.max(2, navigator.hardwareConcurrency || 4),
   });
 
-  // Warm up: compile shaders and cache compute pipelines
-  const inputSize = inputShape.reduce((a, b) => a * b, 1);
-  const dummyData = new Float32Array(inputSize);
-  const dummyTensor = new ort.Tensor('float32', dummyData, inputShape);
-  const feeds: Record<string, ort.Tensor> = {};
-  feeds[session.inputNames[0]] = dummyTensor;
-  await session.run(feeds);
-
   return session;
 }
 
-async function createWasmSession(modelBuffer: ArrayBuffer, inputShape: number[]): Promise<ort.InferenceSession> {
+async function createWasmSession(modelBuffer: ArrayBuffer): Promise<ort.InferenceSession> {
   const session = await ort.InferenceSession.create(modelBuffer, {
     executionProviders: ['wasm'],
     graphOptimizationLevel: 'all',
@@ -75,48 +68,76 @@ async function createWasmSession(modelBuffer: ArrayBuffer, inputShape: number[])
     intraOpNumThreads: Math.max(2, navigator.hardwareConcurrency || 4),
   });
 
-  // Warm up
-  const inputSize = inputShape.reduce((a, b) => a * b, 1);
-  const dummyData = new Float32Array(inputSize);
-  const dummyTensor = new ort.Tensor('float32', dummyData, inputShape);
-  const feeds: Record<string, ort.Tensor> = {};
-  feeds[session.inputNames[0]] = dummyTensor;
-  await session.run(feeds);
-
   return session;
 }
 
-export async function initSession(name: ModelName): Promise<void> {
+export async function initSession(name: ModelName, signal?: AbortSignal): Promise<void> {
   if (sessions.has(name)) return;
-  if (loading.has(name)) return loading.get(name)!;
+
+  // If already loading, wait for the existing promise
+  const existing = loading.get(name);
+  if (existing) {
+    try {
+      await existing;
+      return;
+    } catch {
+      // Previous load failed — will retry below
+    }
+  }
 
   const config = getConfig(name);
+  const gen = generation;
+  const abortController = new AbortController();
+  const linkedSignal = signal
+    ? abortController.signal
+    : abortController.signal;
+
+  // Link external signal
+  if (signal) {
+    signal.addEventListener('abort', () => abortController.abort(), { once: true });
+  }
+
   const promise = (async () => {
-    const buffer = await fetchModelBuffer(config.url);
+    const buffer = await fetchModelBuffer(config.url, linkedSignal);
+
+    // Check generation — if disposeAll was called, abort
+    if (gen !== generation) {
+      return;
+    }
 
     let session: ort.InferenceSession;
     let backend: 'webgpu' | 'wasm';
 
     if (hasWebGPU()) {
       try {
-        session = await createWebGPUSession(buffer, config.inputShape);
+        session = await createWebGPUSession(buffer);
         backend = 'webgpu';
       } catch (err) {
-        console.warn(`WebGPU init failed for ${name}, falling back to WASM:`, err);
-        session = await createWasmSession(buffer, config.inputShape);
+        console.warn(`WebGPU init failed for ${name}, falling back to WASM:`, err instanceof Error ? err.message : err);
+        session = await createWasmSession(buffer);
         backend = 'wasm';
       }
     } else {
-      session = await createWasmSession(buffer, config.inputShape);
+      session = await createWasmSession(buffer);
       backend = 'wasm';
+    }
+
+    // Final generation check before storing
+    if (gen !== generation) {
+      session.release();
+      return;
     }
 
     sessions.set(name, { session, backend });
   })();
 
   loading.set(name, promise);
-  await promise;
-  loading.delete(name);
+
+  try {
+    await promise;
+  } finally {
+    loading.delete(name);
+  }
 }
 
 export function getBackend(name: ModelName): 'webgpu' | 'wasm' | null {
@@ -154,8 +175,11 @@ export function isReady(name: ModelName): boolean {
 }
 
 export async function disposeAll(): Promise<void> {
+  generation++;
   for (const [, entry] of sessions) {
-    entry.session.release();
+    try {
+      entry.session.release();
+    } catch { /* ignore release errors */ }
   }
   sessions.clear();
   loading.clear();
