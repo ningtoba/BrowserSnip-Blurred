@@ -12,34 +12,43 @@ interface MP4Sample {
 }
 
 function readUint32(buf: Uint8Array, off: number): number {
-  return (buf[off] << 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3];
+  return ((buf[off] << 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3]) >>> 0;
 }
 
 function findBox(buf: Uint8Array, type: string, start: number, end: number): { offset: number; size: number } | null {
   let off = start;
   while (off < end - 8) {
-    const size = readUint32(buf, off);
-    const tag = String.fromCharCode(buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]);
-    if (size <= 0 || off + size > end) break;
-    if (tag === type) return { offset: off + 8, size: size - 8 };
-    off += size;
+    let size = readUint32(buf, off);
+    if (size === 1) {
+      // 64-bit extended size: read high 4 bytes and low 4 bytes
+      const hi = readUint32(buf, off + 8);
+      const lo = readUint32(buf, off + 12);
+      size = hi * 0x100000000 + lo - 8; // subtract header for consistency
+      if (size <= 0 || off + 16 + size > end) { off += 16 + size; continue; }
+      const tag = String.fromCharCode(buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]);
+      if (tag === type) return { offset: off + 16, size };
+      off += 16 + size;
+    } else if (size === 0) {
+      // Box extends to end of file
+      const tag = String.fromCharCode(buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]);
+      if (tag === type) return { offset: off + 8, size: end - off - 8 };
+      break; // No more boxes after an EOF-sized box
+    } else if (size < 8 || off + size > end) {
+      break; // Invalid size — stop parsing
+    } else {
+      const tag = String.fromCharCode(buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]);
+      if (tag === type) return { offset: off + 8, size: size - 8 };
+      off += size;
+    }
   }
   return null;
 }
 
 function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array; width: number; height: number } | null {
   try {
-    // Log top-level boxes
-    const topBoxes: string[] = [];
-    let scanOff = 0;
-    while (scanOff < Math.min(buf.length, 200) - 8) {
-      const sz = readUint32(buf, scanOff);
-      const tg = String.fromCharCode(buf[scanOff + 4], buf[scanOff + 5], buf[scanOff + 6], buf[scanOff + 7]);
-      if (sz <= 0 || scanOff + sz > buf.length) break;
-      topBoxes.push(tg + ':' + sz);
-      scanOff += sz;
-    }
-    console.debug('[demux] top-level boxes:', topBoxes.join(', '), '| file size:', (buf.length / 1024 / 1024).toFixed(1), 'MB');
+    // Log first bytes to identify format
+    const header = Array.from(buf.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+    console.debug('[demux] file header:', header);
 
     const moov = findBox(buf, 'moov', 0, buf.length);
     if (!moov) { console.debug('[demux] moov not found in', buf.length, 'bytes'); return null; }
