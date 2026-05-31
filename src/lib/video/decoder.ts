@@ -15,6 +15,14 @@ function readUint32(buf: Uint8Array, off: number): number {
   return ((buf[off] << 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3]) >>> 0;
 }
 
+function readUintBE(buf: Uint8Array, off: number, size: number): number {
+  let val = 0;
+  for (let i = 0; i < size; i++) {
+    val = (val << 8) | buf[off + i];
+  }
+  return val >>> 0;
+}
+
 function findBox(buf: Uint8Array, type: string, start: number, end: number): { offset: number; size: number } | null {
   let off = start;
   while (off < end - 8) {
@@ -276,7 +284,7 @@ function parseWebM(buf: Uint8Array): { tracks: WebMTrack[]; clusters: { timestam
               const ee = eoff + es.value;
               if (ee > te) break;
               if (ev.value === 0x06) currentTrack.codec = new TextDecoder().decode(buf.slice(eoff, ee));
-              else if (ev.value === 0x23A2) currentTrack.codecPrivate = buf.slice(eoff, ee);
+              else if (ev.value === 0x23A2) { currentTrack.codecPrivate = buf.slice(eoff, ee); console.debug('[WebM] CodecPrivate:', currentTrack.codecPrivate.length, 'bytes, first bytes:', Array.from(currentTrack.codecPrivate.slice(0, 8)).map(b => b.toString(16).padStart(2,'0')).join(' ')); }
               else if (ev.value === 0x60) {
                 // Video
                 let voff = eoff;
@@ -287,8 +295,8 @@ function parseWebM(buf: Uint8Array): { tracks: WebMTrack[]; clusters: { timestam
                   voff += vs.len;
                   const ve = voff + vs.value;
                   if (ve > ee) break;
-                  if (vv.value === 0x30) currentTrack!.width = readVINTValue(buf, voff);
-                  else if (vv.value === 0x3A) currentTrack!.height = readVINTValue(buf, voff);
+                  if (vv.value === 0x30) currentTrack!.width = readUintBE(buf, voff, vs.value);
+                  else if (vv.value === 0x3A) currentTrack!.height = readUintBE(buf, voff, vs.value);
                   voff = ve;
                 }
               }
