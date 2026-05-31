@@ -123,6 +123,10 @@ export async function* decodeFramesWebCodecs(
   const samples = parseAnnexB(h264Data);
   if (samples.length === 0) throw new Error('No H.264 samples found');
 
+  const counts = { sps: 0, pps: 0, idr: 0, 'non-idr': 0 };
+  for (const s of samples) counts[s.type]++;
+  console.debug(`[WebCodecs] ${samples.length} NALs:`, counts);
+
   // Find SPS and PPS for codec config
   const spsSample = samples.find((s) => s.type === 'sps');
   const ppsSample = samples.find((s) => s.type === 'pps');
@@ -201,8 +205,17 @@ export async function* decodeFramesWebCodecs(
   }
 
   if (!foundKeyframe) throw new Error('No keyframe found in bitstream');
+  if (decodeError) throw decodeError;
 
+  console.debug(`[WebCodecs] ${timestamp / frameIntervalUs} chunks sent, flushing...`);
   await decoder.flush();
+  console.debug(`[WebCodecs] flush done, ${frameQueue.length} frames decoded`);
+
+  if (frameQueue.length === 0) {
+    decoder.close();
+    if (decodeError) throw decodeError;
+    throw new Error('Decoder produced 0 frames');
+  }
 
   // Read decoded frames
   const canvas = new OffscreenCanvas(1, 1);
