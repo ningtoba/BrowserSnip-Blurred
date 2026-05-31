@@ -6,7 +6,6 @@ export function generateSampleTimestamps(
 ): number[] {
   const timestamps: number[] = [];
   const margin = 0.1;
-  const effectiveDuration = Math.max(0, duration - margin * 2);
   const interval = 1 / sampleFps;
   for (let t = margin; t < duration - margin; t += interval) {
     timestamps.push(t);
@@ -41,54 +40,117 @@ export async function extractFramesAtTimestamps(
   video.src = url;
 
   await new Promise<void>((resolve, reject) => {
-    const onLoaded = () => {
-      video.removeEventListener('loadedmetadata', onLoaded);
-      video.removeEventListener('error', onError);
-      resolve();
-    };
-    const onError = () => {
-      video.removeEventListener('loadedmetadata', onLoaded);
-      video.removeEventListener('error', onError);
-      reject(new Error('Failed to load video'));
-    };
-    video.addEventListener('loadedmetadata', onLoaded);
-    video.addEventListener('error', onError);
+    video.addEventListener('loadedmetadata', () => resolve(), { once: true });
+    video.addEventListener('error', () => reject(new Error('Failed to load video')), { once: true });
     video.load();
   });
 
   const total = timestamps.length;
   const frames: ImageData[] = [];
-
-  const canvas = document.createElement('canvas');
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
+  const canvas = new OffscreenCanvas(video.videoWidth, video.videoHeight);
   const ctx = canvas.getContext('2d')!;
 
   for (let i = 0; i < total; i++) {
     if (signal?.aborted) break;
 
-    const timestamp = timestamps[i];
-    video.currentTime = timestamp;
-
+    video.currentTime = timestamps[i];
     await new Promise<void>((resolve) => {
-      const onSeeked = () => {
-        video.removeEventListener('seeked', onSeeked);
-        resolve();
-      };
-      video.addEventListener('seeked', onSeeked);
+      video.addEventListener('seeked', () => resolve(), { once: true });
     });
 
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    frames.push(imageData);
-
+    frames.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
     onProgress?.(i + 1, total);
   }
 
   URL.revokeObjectURL(url);
   video.remove();
-
   return frames;
+}
+
+export async function extractFramesStreaming(
+  videoFile: File,
+  onFrame: (imageData: ImageData, timestamp: number, index: number) => Promise<boolean>,
+  signal?: AbortSignal
+): Promise<number> {
+  const video = document.createElement('video');
+  video.preload = 'auto';
+  video.muted = true;
+  video.crossOrigin = 'anonymous';
+  video.playsInline = true;
+
+  const url = URL.createObjectURL(videoFile);
+  video.src = url;
+
+  await new Promise<void>((resolve, reject) => {
+    video.addEventListener('loadedmetadata', () => resolve(), { once: true });
+    video.addEventListener('error', () => reject(new Error('Failed to load video')), { once: true });
+    video.load();
+  });
+
+  const w = video.videoWidth;
+  const h = video.videoHeight;
+  const canvas = new OffscreenCanvas(w, h);
+  const ctx = canvas.getContext('2d')!;
+
+  let frameIndex = 0;
+  let stopped = false;
+
+  const processLoop = new Promise<number>((resolve) => {
+    const cb: VideoFrameRequestCallback = (_now, _metadata) => {
+      if (signal?.aborted || stopped || video.ended) {
+        resolve(frameIndex);
+        return;
+      }
+
+      ctx.drawImage(video, 0, 0, w, h);
+      const imageData = ctx.getImageData(0, 0, w, h);
+
+      onFrame(imageData, video.currentTime, frameIndex)
+        .then((keepGoing) => {
+          if (!keepGoing || signal?.aborted || video.ended) {
+            stopped = true;
+            video.pause();
+            resolve(frameIndex);
+            return;
+          }
+          frameIndex++;
+          updateProgressThrottled(frameIndex, video.duration, video.currentTime);
+          video.requestVideoFrameCallback(cb);
+        })
+        .catch(() => {
+          video.pause();
+          resolve(frameIndex);
+        });
+    };
+
+    video.requestVideoFrameCallback(cb);
+    video.play().catch(() => {
+      // Autoplay blocked — fall back to muted play
+      video.muted = true;
+      video.play().catch(() => resolve(frameIndex));
+    });
+  });
+
+  const result = await processLoop;
+
+  video.pause();
+  URL.revokeObjectURL(url);
+  video.remove();
+
+  return result;
+}
+
+let lastProgressUpdate = 0;
+
+function updateProgressThrottled(
+  frameIndex: number,
+  duration: number,
+  currentTime: number
+): void {
+  const now = performance.now();
+  if (now - lastProgressUpdate < 200) return;
+  lastProgressUpdate = now;
 }
 
 export async function getVideoMetadata(
@@ -102,18 +164,8 @@ export async function getVideoMetadata(
   video.src = url;
 
   await new Promise<void>((resolve, reject) => {
-    const onLoaded = () => {
-      video.removeEventListener('loadedmetadata', onLoaded);
-      video.removeEventListener('error', onError);
-      resolve();
-    };
-    const onError = () => {
-      video.removeEventListener('loadedmetadata', onLoaded);
-      video.removeEventListener('error', onError);
-      reject(new Error('Failed to load video'));
-    };
-    video.addEventListener('loadedmetadata', onLoaded);
-    video.addEventListener('error', onError);
+    video.addEventListener('loadedmetadata', () => resolve(), { once: true });
+    video.addEventListener('error', () => reject(new Error('Failed to load video')), { once: true });
     video.load();
   });
 

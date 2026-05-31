@@ -7,6 +7,8 @@ type ModelName = 'yolo' | 'mfn';
 const sessions = new Map<ModelName, ort.InferenceSession>();
 const loading = new Map<ModelName, Promise<void>>();
 
+ort.env.wasm.numThreads = Math.max(2, navigator.hardwareConcurrency || 4);
+
 function getConfig(name: ModelName) {
   const config = MODELS.find((m) => m.name === name);
   if (!config) throw new Error(`Unknown model: ${name}`);
@@ -53,6 +55,10 @@ export async function initSession(name: ModelName): Promise<void> {
 
     const session = await ort.InferenceSession.create(buffer, {
       executionProviders: ['webgpu'],
+      graphOptimizationLevel: 'all',
+      enableCpuMemArena: true,
+      enableMemPattern: true,
+      intraOpNumThreads: Math.max(2, navigator.hardwareConcurrency || 4),
     });
 
     sessions.set(name, session);
