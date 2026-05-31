@@ -12,7 +12,7 @@ import { reconstructVideo } from '@/lib/video/reconstruct';
 import { detectFaces } from '@/lib/engine/detection';
 import { recognizeFace } from '@/lib/engine/recognition';
 import { applyBlurToFrame } from '@/lib/engine/blur';
-import { SAMPLE_FPS, PHASE_WEIGHTS, BATCH_SIZE, DETECT_EVERY_N_FRAMES, DETECTION_CONFIDENCE } from '@/lib/constants';
+import { SAMPLE_FPS, PHASE_WEIGHTS, BATCH_SIZE, DETECT_EVERY_N_FRAMES } from '@/lib/constants';
 import type { FaceDetection, DetectionBox, FaceIdentity, PipelinePhase } from '@/types';
 import { getFFmpeg } from '@/lib/ffmpeg/core';
 

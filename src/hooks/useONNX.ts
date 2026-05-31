@@ -24,7 +24,7 @@ export function useONNX(): ONNXState {
     let loaded = 0;
 
     for (const model of MODELS) {
-      const modelLabel = model.name === 'scrfd' ? 'face detection' : 'face recognition';
+      const modelLabel = model.name === 'yunet' ? 'face detection' : 'face recognition';
       setState((s) => ({
         ...s,
         loadingMessage: `Downloading ${modelLabel} model (${model.sizeMB} MB)...`,
@@ -32,7 +32,7 @@ export function useONNX(): ONNXState {
       }));
 
       try {
-        await initSession(model.name as 'scrfd' | 'mfn');
+        await initSession(model.name as 'yunet' | 'mfn');
       } catch (err) {
         setState((s) => ({
           ...s,
@@ -48,7 +48,7 @@ export function useONNX(): ONNXState {
       }));
     }
 
-    const detBackend = getBackend('scrfd');
+    const detBackend = getBackend('yunet');
     setState((s) => ({
       ...s,
       gpuAccelerated: detBackend === 'webgpu',

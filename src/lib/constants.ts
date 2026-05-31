@@ -1,12 +1,13 @@
 import type { ONNXModelConfig, PipelinePhase } from '@/types';
 
 export const SAMPLE_FPS = 1;
-export const DETECTION_CONFIDENCE = 0.4;
-export const NMS_IOU_THRESHOLD = 0.45;
 export const CLUSTER_SIMILARITY_THRESHOLD = 0.45;
 export const FACE_EXPAND_RATIO = 0.2;
 export const FACE_INPUT_SIZE = 112;
-export const YOLO_INPUT_SIZE = 640;
+export const YUNET_INPUT_SIZE = 640;
+export const YUNET_CONF_THRESHOLD = 0.5;
+export const YUNET_NMS_THRESHOLD = 0.3;
+export const YUNET_TOP_K = 5000;
 export const PIXELATE_BLOCK_SIZE = 15;
 export const BATCH_SIZE = 300;
 export const DETECT_EVERY_N_FRAMES = 2;
@@ -14,9 +15,9 @@ export const MAX_DETECTIONS_PER_FRAME = 20;
 
 export const MODELS: ONNXModelConfig[] = [
   {
-    name: 'scrfd',
-    url: '/models/det_500m.onnx',
-    sizeMB: 2.5,
+    name: 'yunet',
+    url: '/models/face_detection_yunet_2023mar.onnx',
+    sizeMB: 0.23,
     inputShape: [1, 3, 640, 640],
   },
   {

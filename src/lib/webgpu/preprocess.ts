@@ -1,7 +1,7 @@
 import * as ort from 'onnxruntime-web';
 import { getGPUDevice } from '@/lib/webgpu/context';
 import { NORMALIZE_CHW_SHADER } from '@/lib/webgpu/shaders';
-import { YOLO_INPUT_SIZE, FACE_INPUT_SIZE } from '@/lib/constants';
+import { YUNET_INPUT_SIZE, FACE_INPUT_SIZE } from '@/lib/constants';
 
 let pipeline: GPUComputePipeline | null = null;
 let sampler: GPUSampler | null = null;
@@ -115,7 +115,7 @@ async function runNormalizeShader(
   return result;
 }
 
-export async function preprocessYOLO(
+export async function preprocessYuNet(
   imageData: ImageData
 ): Promise<{
   tensor: ort.Tensor;
@@ -124,14 +124,14 @@ export async function preprocessYOLO(
   padTop: number;
 }> {
   const { scale, padLeft, padTop } = letterboxParams(
-    imageData.width, imageData.height, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE,
+    imageData.width, imageData.height, YUNET_INPUT_SIZE, YUNET_INPUT_SIZE,
   );
   const data = await runNormalizeShader(
-    imageData, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE,
+    imageData, YUNET_INPUT_SIZE, YUNET_INPUT_SIZE,
     { mean: [0, 0, 0], std: [255, 255, 255] },
   );
   return {
-    tensor: new ort.Tensor('float32', data, [1, 3, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE]),
+    tensor: new ort.Tensor('float32', data, [1, 3, YUNET_INPUT_SIZE, YUNET_INPUT_SIZE]),
     scale, padLeft, padTop,
   };
 }
