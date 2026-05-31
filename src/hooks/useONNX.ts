@@ -24,7 +24,7 @@ export function useONNX(): ONNXState {
     let loaded = 0;
 
     for (const model of MODELS) {
-      const modelLabel = model.name === 'yolo' ? 'face detection' : 'face recognition';
+      const modelLabel = model.name === 'scrfd' ? 'face detection' : 'face recognition';
       setState((s) => ({
         ...s,
         loadingMessage: `Downloading ${modelLabel} model (${model.sizeMB} MB)...`,
@@ -32,7 +32,7 @@ export function useONNX(): ONNXState {
       }));
 
       try {
-        await initSession(model.name as 'yolo' | 'mfn');
+        await initSession(model.name as 'scrfd' | 'mfn');
       } catch (err) {
         setState((s) => ({
           ...s,
@@ -48,11 +48,11 @@ export function useONNX(): ONNXState {
       }));
     }
 
-    const yoloBackend = getBackend('yolo');
+    const detBackend = getBackend('scrfd');
     setState((s) => ({
       ...s,
-      gpuAccelerated: yoloBackend === 'webgpu',
-      loadingMessage: yoloBackend === 'webgpu'
+      gpuAccelerated: detBackend === 'webgpu',
+      loadingMessage: detBackend === 'webgpu'
         ? 'Initializing WebGPU inference engine...'
         : 'Initializing CPU inference engine (slower)...',
       loadingPercent: 80,

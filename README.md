@@ -15,18 +15,18 @@ Requires a WebGPU-capable browser (Chrome 113+, Edge 113+).
 
 | File | Source | Size |
 |------|--------|------|
-| `yolo26n-face.onnx` | [akanametov/yolo-face](https://github.com/akanametov/yolo-face) — YOLOv26n trained on WIDER Face | 9.9 MB |
+| `det_500m.onnx` | [InsightFace buffalo_sc](https://github.com/deepinsight/insightface/releases) — SCRFD face detector with 5-point landmarks | 2.5 MB |
 | `w600k_mbf.onnx` | [InsightFace buffalo_sc](https://github.com/deepinsight/insightface/releases) — MobileFaceNet | 13 MB |
 
 ## Pipeline
 
-Upload → sample frames → YOLO detects faces → MobileFaceNet generates embeddings → cosine-similarity clustering groups identities → pick face(s) and blur type → full-frame processing with zero-copy GPU pipeline → ffmpeg-wasm reconstructs video.
+Upload → sample frames → SCRFD detects faces with 5-point landmarks → MobileFaceNet generates embeddings → cosine-similarity clustering groups identities → pick face(s) and blur type → full-frame processing → ffmpeg-wasm reconstructs video.
 
-Preprocessing and blur run as WebGPU compute shaders. Video frames are imported directly from the decoder via `importExternalTexture` — zero CPU copies for detection input. Detection runs every 2nd frame with bbox reuse for intermediate frames.
+Detection runs every 2nd frame with bbox reuse for intermediate frames. Blur runs as WebGPU compute shaders with CPU fallback.
 
 ## Acknowledgments
 
-- [akanametov/yolo-face](https://github.com/akanametov/yolo-face) — YOLOv26n-face model
+- [akanametov/yolo-face](https://github.com/akanametov/yolo-face)
 - [Ultralytics YOLO](https://github.com/ultralytics/ultralytics)
 - [InsightFace](https://github.com/deepinsight/insightface)
 - [ONNX Runtime Web](https://github.com/microsoft/onnxruntime)

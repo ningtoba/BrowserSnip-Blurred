@@ -14,9 +14,9 @@ export const MAX_DETECTIONS_PER_FRAME = 20;
 
 export const MODELS: ONNXModelConfig[] = [
   {
-    name: 'yolo',
-    url: '/models/yolo26n-face.onnx',
-    sizeMB: 9.9,
+    name: 'scrfd',
+    url: '/models/det_500m.onnx',
+    sizeMB: 2.5,
     inputShape: [1, 3, 640, 640],
   },
   {

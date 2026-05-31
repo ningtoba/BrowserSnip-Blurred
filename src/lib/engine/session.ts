@@ -1,8 +1,7 @@
 import * as ort from 'onnxruntime-web';
-import type { DetectionBox } from '@/types';
-import { MODELS, DETECTION_CONFIDENCE } from '@/lib/constants';
+import { MODELS } from '@/lib/constants';
 
-type ModelName = 'yolo' | 'mfn';
+type ModelName = 'scrfd' | 'mfn';
 
 interface SessionEntry {
   session: ort.InferenceSession;
@@ -124,41 +123,8 @@ export function getBackend(name: ModelName): 'webgpu' | 'wasm' | null {
   return sessions.get(name)?.backend ?? null;
 }
 
-export async function runYOLO(
-  input: Float32Array | ort.Tensor
-): Promise<DetectionBox[]> {
-  const entry = sessions.get('yolo');
-  if (!entry) throw new Error('YOLO session not initialized');
-
-  const tensor: ort.Tensor = input instanceof ort.Tensor
-    ? input
-    : new ort.Tensor('float32', input as Float32Array, [1, 3, 640, 640]);
-  const feeds: Record<string, ort.Tensor> = {};
-  feeds[entry.session.inputNames[0]] = tensor;
-
-  const results = await entry.session.run(feeds);
-  const output = results[entry.session.outputNames[0]];
-
-  const data = await output.getData();
-  const floatData = data as Float32Array;
-  const dims = output.dims;
-  output.dispose();
-
-  const numDetections = dims[1];
-  const boxes: DetectionBox[] = [];
-
-  for (let i = 0; i < numDetections; i++) {
-    const offset = i * 6;
-    const x1 = floatData[offset];
-    const y1 = floatData[offset + 1];
-    const x2 = floatData[offset + 2];
-    const y2 = floatData[offset + 3];
-    const confidence = floatData[offset + 4];
-    if (confidence < DETECTION_CONFIDENCE) continue;
-    boxes.push({ x1, y1, x2, y2, confidence });
-  }
-
-  return boxes;
+export function getSession(name: ModelName): ort.InferenceSession | null {
+  return sessions.get(name)?.session ?? null;
 }
 
 export async function runMFN(
