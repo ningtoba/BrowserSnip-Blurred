@@ -46,9 +46,9 @@ function findBox(buf: Uint8Array, type: string, start: number, end: number): { o
 
 function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array; width: number; height: number } | null {
   try {
-    // Log first bytes to identify format
-    const header = Array.from(buf.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' ');
-    console.debug('[demux] file header:', header);
+    // Log first bytes to identify format and structure
+    const header64 = Array.from(buf.slice(0, 64)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+    console.debug('[demux] first 64 bytes:', header64);
 
     const moov = findBox(buf, 'moov', 0, buf.length);
     if (!moov) { console.debug('[demux] moov not found in', buf.length, 'bytes'); return null; }
@@ -214,19 +214,19 @@ interface WebMTrack {
 
 function parseWebM(buf: Uint8Array): { tracks: WebMTrack[]; clusters: { timestamp: number; blocks: Uint8Array[] }[] } | null {
   try {
-    // Find Segment (0x18538067) — skip EBML header
+    // Find Segment (0x18538067) — skip EBML header and other top-level elements
     let off = 0;
-    while (off < buf.length - 4) {
-      const idLen = readVINTLen(buf, off);
-      const idVal = readVINTValue(buf, off);
-      if (idVal === 0x18538067) break;
-      if (idLen === 0) break;
-      off += idLen;
-      const sizeRV = readVINT(buf, off);
-      if (!sizeRV) break;
-      off += sizeRV.len + sizeRV.value;
+    const scanned: string[] = [];
+    while (off < buf.length - 4 && scanned.length < 20) {
+      const idVint = readVINT(buf, off);
+      if (!idVint) break;
+      const szVint = readVINT(buf, off + idVint.len);
+      if (!szVint) break;
+      scanned.push(`0x${idVint.value.toString(16)}:${szVint.value}`);
+      if (idVint.value === 0x18538067) { console.debug('[WebM] found Segment at', off, 'scanned:', scanned.join(', ')); break; }
+      off += idVint.len + szVint.len + szVint.value;
     }
-    if (off >= buf.length - 4) { console.debug('[WebM] segment not found'); return null; }
+    if (off >= buf.length - 4) { console.debug('[WebM] segment not found, scanned:', scanned.join(', ')); return null; }
 
     const segStart = off;
     const segVint = readVINT(buf, off + readVINTLen(buf, off));
