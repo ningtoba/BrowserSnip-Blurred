@@ -20,7 +20,9 @@ Requires a WebGPU-capable browser (Chrome 113+, Edge 113+).
 
 ## Pipeline
 
-Upload → sample frames → YOLO detects faces → MobileFaceNet generates embeddings → cosine-similarity clustering groups identities → pick face(s) and blur type → full-frame processing → ffmpeg-wasm reconstructs video.
+Upload → sample frames → YOLO detects faces → MobileFaceNet generates embeddings → cosine-similarity clustering groups identities → pick face(s) and blur type → full-frame processing with zero-copy GPU pipeline → ffmpeg-wasm reconstructs video.
+
+Preprocessing and blur run as WebGPU compute shaders. Video frames are imported directly from the decoder via `importExternalTexture` — zero CPU copies for detection input. Detection runs every 2nd frame with bbox reuse for intermediate frames.
 
 ## Acknowledgments
 
@@ -29,6 +31,7 @@ Upload → sample frames → YOLO detects faces → MobileFaceNet generates embe
 - [InsightFace](https://github.com/deepinsight/insightface)
 - [ONNX Runtime Web](https://github.com/microsoft/onnxruntime)
 - [ffmpeg.wasm](https://github.com/ffmpegwasm/ffmpeg.wasm)
+- [coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker)
 - [BrowserSnip](https://github.com/ningtoba/BrowserSnip)
 
 ## License
