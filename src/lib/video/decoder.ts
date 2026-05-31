@@ -29,11 +29,9 @@ function findBox(buf: Uint8Array, type: string, start: number, end: number): { o
 
 function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array; width: number; height: number } | null {
   try {
-    // Find moov box
     const moov = findBox(buf, 'moov', 0, buf.length);
-    if (!moov) return null;
+    if (!moov) { console.debug('[demux] moov not found'); return null; }
 
-    // Find trak with vide media
     const moovEnd = moov.offset + moov.size;
     let trakOff = moov.offset;
     let avcC: Uint8Array | null = null;
@@ -50,23 +48,32 @@ function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array; wi
         if (!stbl) { trakOff += tSize; continue; }
         const stblEnd = stbl.offset + stbl.size;
 
-        // stsd: sample description (full box: version+flags at +0, count at +4)
         const stsdBox = findBox(buf, 'stsd', stbl.offset, stblEnd);
         if (stsdBox) {
           const entryCount = readUint32(buf, stsdBox.offset + 4);
           if (entryCount > 0) {
-            const entryStart = stsdBox.offset + 8; // after version+flags+count
+            const entryStart = stsdBox.offset + 8;
             const entrySize = readUint32(buf, entryStart);
             const entryTag = String.fromCharCode(buf[entryStart + 4], buf[entryStart + 5], buf[entryStart + 6], buf[entryStart + 7]);
-            if (entryTag === 'avc1' || entryTag === 'avc3') {
+            console.debug('[demux] stsd entry:', entryTag, 'size:', entrySize);
+            if (entryTag === 'avc1' || entryTag === 'avc3' || entryTag === 'hvc1' || entryTag === 'hev1') {
               width = (buf[entryStart + 24] << 8) | buf[entryStart + 25];
               height = (buf[entryStart + 26] << 8) | buf[entryStart + 27];
-              // Scan for avcC fourCC within the entry data
               for (let s = entryStart + 8; s < entryStart + entrySize - 12; s++) {
-                if (buf[s] === 0x61 && buf[s+1] === 0x76 && buf[s+2] === 0x63 && buf[s+3] === 0x43) { // 'avcC'
+                if (buf[s] === 0x61 && buf[s+1] === 0x76 && buf[s+2] === 0x63 && buf[s+3] === 0x43) {
                   const avcCSize = readUint32(buf, s - 4);
                   if (avcCSize > 8 && avcCSize < entrySize) {
                     avcC = buf.slice(s + 4, s - 4 + avcCSize);
+                    console.debug('[demux] found avcC at offset', s - 4, 'size:', avcC.length);
+                  }
+                  break;
+                }
+                // Also check for hvcC (HEVC)
+                if (buf[s] === 0x68 && buf[s+1] === 0x76 && buf[s+2] === 0x63 && buf[s+3] === 0x43) {
+                  const hvcCSize = readUint32(buf, s - 4);
+                  if (hvcCSize > 8 && hvcCSize < entrySize) {
+                    avcC = buf.slice(s + 4, s - 4 + hvcCSize);
+                    console.debug('[demux] found hvcC at offset', s - 4, 'size:', avcC.length);
                   }
                   break;
                 }
@@ -75,7 +82,6 @@ function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array; wi
           }
         }
 
-        // stco/co64: chunk offsets (full box: version+flags at +0, count at +4)
         let stcoBox = findBox(buf, 'stco', stbl.offset, stblEnd);
         if (!stcoBox) stcoBox = findBox(buf, 'co64', stbl.offset, stblEnd);
         if (stcoBox) {
@@ -85,7 +91,6 @@ function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array; wi
           }
         }
 
-        // stsc: sample-to-chunk (full box: version+flags at +0, count at +4)
         const stscBox = findBox(buf, 'stsc', stbl.offset, stblEnd);
         if (stscBox) {
           const count = readUint32(buf, stscBox.offset + 4);
@@ -95,7 +100,6 @@ function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array; wi
           }
         }
 
-        // stsz: sample sizes (full box: version+flags at +0, sample_size at +4, count at +8)
         const stszBox = findBox(buf, 'stsz', stbl.offset, stblEnd);
         if (stszBox) {
           const count = readUint32(buf, stszBox.offset + 8);
@@ -104,29 +108,29 @@ function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array; wi
           }
         }
 
-        // stss: sync samples (full box: version+flags at +0, count at +4)
         const stssBox = findBox(buf, 'stss', stbl.offset, stblEnd);
         if (stssBox) {
           const count = readUint32(buf, stssBox.offset + 4);
           for (let i = 0; i < count; i++) {
-            stss.add(readUint32(buf, stssBox.offset + 8 + i * 4) - 1); // 0-indexed
+            stss.add(readUint32(buf, stssBox.offset + 8 + i * 4) - 1);
           }
         }
 
+        console.debug('[demux] stco:', stco.length, 'stsc:', stsc.length, 'stsz:', stsz.length, 'stss:', stss.size);
         if (avcC && stco.length > 0 && stsc.length > 0 && stsz.length > 0) break;
       }
       trakOff += tSize;
     }
 
-    if (!avcC) return null;
+    if (!avcC) { console.debug('[demux] no avcC found'); return null; }
+    if (stco.length === 0) { console.debug('[demux] no stco'); return null; }
+    if (stsc.length === 0) { console.debug('[demux] no stsc'); return null; }
+    if (stsz.length === 0) { console.debug('[demux] no stsz'); return null; }
 
-    // Build sample list from stco/stsc/stsz
-    // stsc: [firstChunk, samplesPerChunk, sampleDescriptionIndex]
     const samples: MP4Sample[] = [];
     let stscIdx = 0;
 
     for (let chunkIdx = 0; chunkIdx < stco.length; chunkIdx++) {
-      // Find stsc entry for this chunk
       while (stscIdx + 1 < stsc.length && chunkIdx + 1 >= stsc[stscIdx + 1][0]) {
         stscIdx++;
       }
@@ -145,8 +149,10 @@ function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array; wi
       }
     }
 
+    console.debug('[demux] built', samples.length, 'samples');
     return { samples, avcC, width, height };
-  } catch {
+  } catch (e) {
+    console.debug('[demux] error:', e instanceof Error ? e.message : e);
     return null;
   }
 }
