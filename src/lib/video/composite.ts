@@ -105,7 +105,7 @@ export async function processAndWriteBatch(
 
     let frameImageData = imageData;
     if (targetIndices.size > 0) {
-      frameImageData = applyBlurToFrame(imageData, boxes, targetIndices, blurConfig.type);
+      frameImageData = await applyBlurToFrame(imageData, boxes, targetIndices, blurConfig.type);
     }
 
     const pngName = `frame_${String(batchIndex * 300 + frameCount + 1).padStart(4, '0')}.png`;
