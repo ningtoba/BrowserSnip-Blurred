@@ -26,6 +26,14 @@ Standard COCO YOLO has no face class — you need a face-specific model from Hug
 
 Upload → sample frames → YOLO detects faces → MobileFaceNet generates embeddings → cosine-similarity clustering groups identities → pick face(s) and blur type → full-frame processing → ffmpeg-wasm reconstructs video.
 
+## Acknowledgments
+
+- [Ultralytics YOLO](https://github.com/ultralytics/ultralytics)
+- [InsightFace](https://github.com/deepinsight/insightface)
+- [ONNX Runtime Web](https://github.com/microsoft/onnxruntime)
+- [ffmpeg.wasm](https://github.com/ffmpegwasm/ffmpeg.wasm)
+- [BrowserSnip](https://github.com/ningtoba/BrowserSnip)
+
 ## License
 
 MIT © BrowserSnip Contributors
