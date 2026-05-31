@@ -223,7 +223,7 @@ function parseWebM(buf: Uint8Array): { tracks: WebMTrack[]; clusters: { timestam
       const szVint = readVINT(buf, off + idVint.len);
       if (!szVint) break;
       scanned.push(`0x${idVint.value.toString(16)}:${szVint.value}`);
-      if (idVint.value === 0x18538067) { console.debug('[WebM] found Segment at', off, 'scanned:', scanned.join(', ')); break; }
+      if (idVint.value === 0x08538067) { console.debug('[WebM] found Segment at', off, 'scanned:', scanned.join(', ')); break; }
       off += idVint.len + szVint.len + szVint.value;
     }
     if (off >= buf.length - 4) { console.debug('[WebM] segment not found, scanned:', scanned.join(', ')); return null; }
@@ -253,8 +253,8 @@ function parseWebM(buf: Uint8Array): { tracks: WebMTrack[]; clusters: { timestam
       const elEnd = off + elSize;
       if (elEnd > segEnd) break;
 
-      if (elId === 0x1654AE6B) {
-        // Tracks — parse children
+      if (elId === 0x0654AE6B) {
+        // Tracks
         let toff = off;
         while (toff < elEnd - 2) {
           const tv = readVINT(buf, toff); if (!tv) break;
@@ -264,7 +264,7 @@ function parseWebM(buf: Uint8Array): { tracks: WebMTrack[]; clusters: { timestam
           const te = toff + ts.value;
           if (te > elEnd) break;
 
-          if (tv.value === 0xAE) {
+          if (tv.value === 0x2E) {
             // TrackEntry
             currentTrack = { codec: '', width: 0, height: 0 };
             let eoff = toff;
@@ -275,10 +275,10 @@ function parseWebM(buf: Uint8Array): { tracks: WebMTrack[]; clusters: { timestam
               eoff += es.len;
               const ee = eoff + es.value;
               if (ee > te) break;
-              if (ev.value === 0x86) currentTrack.codec = new TextDecoder().decode(buf.slice(eoff, ee));
-              else if (ev.value === 0x63A2) currentTrack.codecPrivate = buf.slice(eoff, ee);
-              else if (ev.value === 0xE0) {
-                // Video sub-element
+              if (ev.value === 0x06) currentTrack.codec = new TextDecoder().decode(buf.slice(eoff, ee));
+              else if (ev.value === 0x23A2) currentTrack.codecPrivate = buf.slice(eoff, ee);
+              else if (ev.value === 0x60) {
+                // Video
                 let voff = eoff;
                 while (voff < ee - 2) {
                   const vv = readVINT(buf, voff); if (!vv) break;
@@ -287,8 +287,8 @@ function parseWebM(buf: Uint8Array): { tracks: WebMTrack[]; clusters: { timestam
                   voff += vs.len;
                   const ve = voff + vs.value;
                   if (ve > ee) break;
-                  if (vv.value === 0xB0) currentTrack!.width = readVINTValue(buf, voff);
-                  else if (vv.value === 0xBA) currentTrack!.height = readVINTValue(buf, voff);
+                  if (vv.value === 0x30) currentTrack!.width = readVINTValue(buf, voff);
+                  else if (vv.value === 0x3A) currentTrack!.height = readVINTValue(buf, voff);
                   voff = ve;
                 }
               }
@@ -298,7 +298,7 @@ function parseWebM(buf: Uint8Array): { tracks: WebMTrack[]; clusters: { timestam
           }
           toff = te;
         }
-      } else if (elId === 0x1F43B675) {
+      } else if (elId === 0x0F43B675) {
         // Cluster
         clusterTime = 0;
         currentBlock = [];
@@ -310,11 +310,9 @@ function parseWebM(buf: Uint8Array): { tracks: WebMTrack[]; clusters: { timestam
           coff += cs.len;
           const ce = coff + cs.value;
           if (ce > elEnd) break;
-          if (cv.value === 0xE7) {
-            // Timestamp
+          if (cv.value === 0x67) {
             clusterTime = readVINTValue(buf, coff);
-          } else if (cv.value === 0xA3) {
-            // SimpleBlock — contains: track(VINT), timecode(2B), flags(1B), data
+          } else if (cv.value === 0x23) {
             const blockData = buf.slice(coff, ce);
             currentBlock.push({ data: blockData });
           }
