@@ -109,6 +109,13 @@ function demuxWithMP4Box(arrayBuf: ArrayBuffer): Promise<{
       for (const s of samples) {
         pendingSamples.push({ data: s.data.buffer.slice(0), key: s.is_sync });
       }
+      if (pendingSamples.length <= 3) {
+        const s = samples[0];
+        console.debug('[MP4Box] sample', pendingSamples.length - 1,
+          'size:', s?.data?.byteLength ?? s?.data?.length,
+          'is_sync:', s?.is_sync,
+          'desc:', config ? 'present' : 'missing');
+      }
     };
 
     file.onError = (e: any) => reject(new Error('MP4Box error: ' + (e?.message || e)));
