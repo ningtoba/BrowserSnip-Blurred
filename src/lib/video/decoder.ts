@@ -6,13 +6,6 @@ interface DecodedFrame {
   index: number;
 }
 
-interface PendingSample {
-  data: ArrayBuffer;
-  key: boolean;
-  cts: number;
-  duration: number;
-}
-
 async function* decodeAndYield(
   config: VideoDecoderConfig,
   chunks: { data: ArrayBuffer; key: boolean }[],
@@ -93,19 +86,14 @@ function demuxWithMP4Box(arrayBuf: ArrayBuffer): Promise<{
 }> {
   return new Promise((resolve, reject) => {
     const file = createFile();
-    const pendingSamples: PendingSample[] = [];
+    const pendingSamples: { data: ArrayBuffer; key: boolean }[] = [];
     let config: VideoDecoderConfig | null = null;
     let ready = false;
 
     file.onReady = (info: any) => {
       const track = info.videoTracks?.[0];
       if (!track) { reject(new Error('No video track')); return; }
-      config = {
-        codec: track.codec,
-        codedWidth: track.track_width,
-        codedHeight: track.track_height,
-      };
-      // Extract avcC/hvcC from track description if available
+      config = { codec: track.codec, codedWidth: track.track_width, codedHeight: track.track_height };
       if (track.description) {
         const descBuf = new ArrayBuffer(track.description.length);
         new Uint8Array(descBuf).set(track.description);
@@ -113,46 +101,31 @@ function demuxWithMP4Box(arrayBuf: ArrayBuffer): Promise<{
       }
       console.debug('[MP4Box] codec:', track.codec, 'size:', track.track_width, 'x', track.track_height);
       file.setExtractionOptions(track.id, 'video');
+      file.start();
       ready = true;
     };
 
     file.onSamples = (_trackId: number, _user: any, samples: any[]) => {
       for (const s of samples) {
-        pendingSamples.push({
-          data: s.data.buffer.slice(0),
-          key: s.is_sync,
-          cts: s.cts,
-          duration: s.duration,
-        });
+        pendingSamples.push({ data: s.data.buffer.slice(0), key: s.is_sync });
       }
     };
 
-    file.onError = (e: any) => {
-      reject(new Error('MP4Box error: ' + (e?.message || e)));
-    };
+    file.onError = (e: any) => reject(new Error('MP4Box error: ' + (e?.message || e)));
 
-    // Feed the buffer as MP4BoxBuffer
     const mp4Buf = MP4BoxBuffer.fromArrayBuffer(arrayBuf, 0);
     (mp4Buf as any).fileStart = 0;
     file.appendBuffer(mp4Buf);
     file.flush();
 
-    // Wait a bit for onReady to fire, then resolve
-    const check = () => {
-      if (ready && config) {
-        const chunks = pendingSamples.map(s => ({ data: s.data, key: s.key }));
-        console.debug('[MP4Box]', chunks.length, 'samples extracted');
-        resolve({ config, chunks });
-      } else if (pendingSamples.length > 0 && config) {
-        // Samples arrived before onReady flag
-        const chunks = pendingSamples.map(s => ({ data: s.data, key: s.key }));
-        console.debug('[MP4Box]', chunks.length, 'samples extracted (late ready)');
-        resolve({ config, chunks });
-      } else {
-        setTimeout(check, 100);
+    const checkInterval = setInterval(() => {
+      if (ready && config && pendingSamples.length > 0) {
+        clearInterval(checkInterval);
+        console.debug('[MP4Box]', pendingSamples.length, 'samples');
+        resolve({ config, chunks: pendingSamples });
       }
-    };
-    setTimeout(check, 200);
+    }, 50);
+    setTimeout(() => { clearInterval(checkInterval); reject(new Error('MP4Box extraction timed out')); }, 30000);
   });
 }
 
@@ -164,7 +137,7 @@ export async function* decodeFramesWebCodecs(
   const ffmpeg = await getFFmpeg();
   const inputBuf = new Uint8Array(await videoFile.arrayBuffer());
 
-  // ffmpeg remux any format to clean MP4
+  // ffmpeg remux to clean MP4
   await ffmpeg.writeFile('input.bin', inputBuf);
   try {
     await ffmpeg.exec(
@@ -172,8 +145,7 @@ export async function* decodeFramesWebCodecs(
       120_000
     );
   } catch {
-    // -c:v copy failed (codec not MP4-compatible), transcode
-    console.debug('[WebCodecs] remux copy failed, transcoding...');
+    console.debug('[WebCodecs] copy failed, transcoding...');
     await ffmpeg.exec(
       ['-i', 'input.bin', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-an', '-movflags', '+faststart', 'clean.mp4'],
       300_000
@@ -185,8 +157,7 @@ export async function* decodeFramesWebCodecs(
   try { await ffmpeg.deleteFile('clean.mp4'); } catch { /* ignore */ }
 
   console.debug('[WebCodecs] remuxed MP4:', mp4Data.length, 'bytes');
-  // Ensure we pass a properly-sized ArrayBuffer
-  const mp4Buffer = mp4Data.buffer.slice(mp4Data.byteOffset, mp4Data.byteOffset + mp4Data.byteLength);
-  const { config, chunks } = await demuxWithMP4Box(mp4Buffer);
+  const mp4Buf = mp4Data.buffer.slice(mp4Data.byteOffset, mp4Data.byteOffset + mp4Data.byteLength);
+  const { config, chunks } = await demuxWithMP4Box(mp4Buf);
   yield* decodeAndYield(config, chunks, signal);
 }
