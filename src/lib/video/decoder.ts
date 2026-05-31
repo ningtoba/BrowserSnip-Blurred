@@ -178,86 +178,203 @@ function demuxMP4(buf: Uint8Array): { samples: MP4Sample[]; avcC: Uint8Array; wi
   }
 }
 
-export async function* decodeFramesWebCodecs(
-  videoFile: File,
+// Minimal WebM/Matroska demuxer for VP8/VP9
+function readVINT(buf: Uint8Array, off: number): { value: number; len: number } | null {
+  if (off >= buf.length) return null;
+  const first = buf[off];
+  if (first === 0) return null;
+  let len = 0;
+  let mask = 0x80;
+  while (!(first & mask) && mask > 0) { len++; mask >>= 1; }
+  len++;
+  if (off + len > buf.length) return null;
+  let value = first & (mask - 1);
+  for (let i = 1; i < len; i++) {
+    value = (value << 8) | buf[off + i];
+  }
+  return { value, len };
+}
+
+function readVINTValue(buf: Uint8Array, off: number): number {
+  const r = readVINT(buf, off);
+  return r ? r.value : 0;
+}
+
+function readVINTLen(buf: Uint8Array, off: number): number {
+  const r = readVINT(buf, off);
+  return r ? r.len : 1;
+}
+
+interface WebMTrack {
+  codec: string;
+  codecPrivate?: Uint8Array;
+  width: number;
+  height: number;
+}
+
+function parseWebM(buf: Uint8Array): { tracks: WebMTrack[]; clusters: { timestamp: number; blocks: Uint8Array[] }[] } | null {
+  try {
+    // Find Segment (0x18538067) — skip EBML header
+    let off = 0;
+    while (off < buf.length - 4) {
+      const idLen = readVINTLen(buf, off);
+      const idVal = readVINTValue(buf, off);
+      if (idVal === 0x18538067) break;
+      if (idLen === 0) break;
+      off += idLen;
+      const sizeRV = readVINT(buf, off);
+      if (!sizeRV) break;
+      off += sizeRV.len + sizeRV.value;
+    }
+    if (off >= buf.length - 4) { console.debug('[WebM] segment not found'); return null; }
+
+    const segStart = off;
+    const segVint = readVINT(buf, off + readVINTLen(buf, off));
+    const segSize = segVint ? segVint.value : (buf.length - segStart);
+    const segEnd = Math.min(segStart + readVINTLen(buf, off) + segVint!.len + segSize, buf.length);
+
+    off += readVINTLen(buf, off) + segVint!.len;
+
+    const tracks: WebMTrack[] = [];
+    const clusters: { timestamp: number; blocks: Uint8Array[] }[] = [];
+    let currentTrack: WebMTrack | null = null;
+    let clusterTime = 0;
+    let currentBlock: { data: Uint8Array }[] = [];
+
+    while (off < segEnd - 2) {
+      const elVint = readVINT(buf, off);
+      if (!elVint) break;
+      const elId = elVint.value;
+      off += elVint.len;
+      const szVint = readVINT(buf, off);
+      if (!szVint) break;
+      const elSize = szVint.value;
+      off += szVint.len;
+      const elEnd = off + elSize;
+      if (elEnd > segEnd) break;
+
+      if (elId === 0x1654AE6B) {
+        // Tracks — parse children
+        let toff = off;
+        while (toff < elEnd - 2) {
+          const tv = readVINT(buf, toff); if (!tv) break;
+          toff += tv.len;
+          const ts = readVINT(buf, toff); if (!ts) break;
+          toff += ts.len;
+          const te = toff + ts.value;
+          if (te > elEnd) break;
+
+          if (tv.value === 0xAE) {
+            // TrackEntry
+            currentTrack = { codec: '', width: 0, height: 0 };
+            let eoff = toff;
+            while (eoff < te - 2) {
+              const ev = readVINT(buf, eoff); if (!ev) break;
+              eoff += ev.len;
+              const es = readVINT(buf, eoff); if (!es) break;
+              eoff += es.len;
+              const ee = eoff + es.value;
+              if (ee > te) break;
+              if (ev.value === 0x86) currentTrack.codec = new TextDecoder().decode(buf.slice(eoff, ee));
+              else if (ev.value === 0x63A2) currentTrack.codecPrivate = buf.slice(eoff, ee);
+              else if (ev.value === 0xE0) {
+                // Video sub-element
+                let voff = eoff;
+                while (voff < ee - 2) {
+                  const vv = readVINT(buf, voff); if (!vv) break;
+                  voff += vv.len;
+                  const vs = readVINT(buf, voff); if (!vs) break;
+                  voff += vs.len;
+                  const ve = voff + vs.value;
+                  if (ve > ee) break;
+                  if (vv.value === 0xB0) currentTrack!.width = readVINTValue(buf, voff);
+                  else if (vv.value === 0xBA) currentTrack!.height = readVINTValue(buf, voff);
+                  voff = ve;
+                }
+              }
+              eoff = ee;
+            }
+            if (currentTrack && currentTrack.codec) tracks.push(currentTrack);
+          }
+          toff = te;
+        }
+      } else if (elId === 0x1F43B675) {
+        // Cluster
+        clusterTime = 0;
+        currentBlock = [];
+        let coff = off;
+        while (coff < elEnd - 2) {
+          const cv = readVINT(buf, coff); if (!cv) break;
+          coff += cv.len;
+          const cs = readVINT(buf, coff); if (!cs) break;
+          coff += cs.len;
+          const ce = coff + cs.value;
+          if (ce > elEnd) break;
+          if (cv.value === 0xE7) {
+            // Timestamp
+            clusterTime = readVINTValue(buf, coff);
+          } else if (cv.value === 0xA3) {
+            // SimpleBlock — contains: track(VINT), timecode(2B), flags(1B), data
+            const blockData = buf.slice(coff, ce);
+            currentBlock.push({ data: blockData });
+          }
+          coff = ce;
+        }
+        if (currentBlock.length > 0) {
+          clusters.push({ timestamp: clusterTime, blocks: currentBlock.map(b => b.data) });
+        }
+      }
+      off = elEnd;
+    }
+
+    console.debug(`[WebM] ${tracks.length} tracks, ${clusters.length} clusters`);
+    if (tracks.length === 0 || clusters.length === 0) return null;
+    return { tracks, clusters };
+  } catch (e) {
+    console.debug('[WebM] parse error:', e instanceof Error ? e.message : e);
+    return null;
+  }
+}
+
+async function* decodeAndYield(
+  config: VideoDecoderConfig,
+  chunks: { data: ArrayBuffer; key: boolean }[],
   signal: AbortSignal
 ): AsyncGenerator<DecodedFrame> {
-  const buf = new Uint8Array(await videoFile.arrayBuffer());
-
-  // Check for MP4 (starts with 'ftyp' at offset 4)
-  const isMP4 = buf.length > 8 && buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70;
-  if (!isMP4) {
-    throw new Error('Only MP4 files are supported for hardware decoding. Please convert your video to MP4 (H.264) format for faster processing.');
-  }
-
-  const demuxed = demuxMP4(buf);
-  if (!demuxed) throw new Error('Failed to parse MP4 structure');
-
-  const { samples, avcC } = demuxed;
-  console.debug(`[WebCodecs] demuxed ${samples.length} samples, avcC: ${avcC.length} bytes`);
-
-  // Build codec string from avcC
-  const codec = 'avc1.' +
-    avcC[1].toString(16).padStart(2, '0') +
-    avcC[2].toString(16).padStart(2, '0') +
-    avcC[3].toString(16).padStart(2, '0');
-
-  // avcC is already in the correct format — just need a standalone ArrayBuffer
-  const descBuf = new ArrayBuffer(avcC.length);
-  new Uint8Array(descBuf).set(avcC);
-
-  const config: VideoDecoderConfig = { codec, description: descBuf };
-  console.debug('[WebCodecs] codec:', codec);
-
   const support = await VideoDecoder.isConfigSupported(config);
-  console.debug('[WebCodecs] isConfigSupported:', support.supported);
-  if (!support.supported) throw new Error(`VideoDecoder config not supported for ${codec}`);
+  if (!support.supported) throw new Error(`VideoDecoder config not supported`);
 
   let frameIndex = 0;
   const frameQueue: VideoFrame[] = [];
   let decodeError: Error | null = null;
 
   const decoder = new VideoDecoder({
-    output(frame: VideoFrame) {
-      frameQueue.push(frame);
-    },
-    error(err: Error) {
-      decodeError = err;
-    },
+    output(frame: VideoFrame) { frameQueue.push(frame); },
+    error(err: Error) { decodeError = err; },
   });
 
   decoder.configure(config);
 
-  // Feed MP4 samples directly (already in length-prefixed format)
-  let timestamp = 0;
   const frameIntervalUs = 33_333;
+  let timestamp = 0;
 
-  for (let i = 0; i < samples.length; i++) {
+  for (let i = 0; i < chunks.length; i++) {
     if (signal.aborted) break;
-
-    const sample = samples[i];
-    const sampleData = buf.subarray(sample.offset, sample.offset + sample.size);
-    const chunkBuf = new ArrayBuffer(sampleData.length);
-    new Uint8Array(chunkBuf).set(sampleData);
-
     try {
       decoder.decode(new EncodedVideoChunk({
-        type: sample.key ? 'key' : 'delta',
-        timestamp,
-        duration: frameIntervalUs,
-        data: chunkBuf,
+        type: chunks[i].key ? 'key' : 'delta',
+        timestamp, duration: frameIntervalUs,
+        data: chunks[i].data,
       }));
     } catch {
       await new Promise(r => setTimeout(r, 10));
       decoder.decode(new EncodedVideoChunk({
-        type: sample.key ? 'key' : 'delta',
-        timestamp,
-        duration: frameIntervalUs,
-        data: chunkBuf,
+        type: chunks[i].key ? 'key' : 'delta',
+        timestamp, duration: frameIntervalUs,
+        data: chunks[i].data,
       }));
     }
     timestamp += frameIntervalUs;
-
     if (i % 30 === 0) {
       await new Promise(r => setTimeout(r, 0));
       if (decodeError) throw decodeError;
@@ -266,18 +383,11 @@ export async function* decodeFramesWebCodecs(
 
   if (decodeError) throw decodeError;
 
-  console.debug(`[WebCodecs] ${samples.length} samples sent, flushing...`);
   const flushOk = await Promise.race([
     decoder.flush().then(() => true),
     new Promise<boolean>(r => setTimeout(() => r(false), 30000)),
   ]);
-
-  if (!flushOk) {
-    decoder.close();
-    throw new Error('Decoder flush timed out after 30s');
-  }
-
-  console.debug(`[WebCodecs] flush done, ${frameQueue.length} frames`);
+  if (!flushOk) { decoder.close(); throw new Error('Decoder flush timed out'); }
 
   const canvas = new OffscreenCanvas(1, 1);
   let ctx: OffscreenCanvasRenderingContext2D | null = null;
@@ -292,12 +402,62 @@ export async function* decodeFramesWebCodecs(
       ctx = ctx ?? canvas.getContext('2d', { willReadFrequently: true })!;
     }
     ctx.drawImage(frame, 0, 0);
-    const imageData = ctx.getImageData(0, 0, w, h);
-    frame.close();
-    yield { imageData, timestamp: frameIndex / 30, index: frameIndex };
+    yield { imageData: ctx.getImageData(0, 0, w, h), timestamp: frameIndex / 30, index: frameIndex };
     frameIndex++;
+    frame.close();
   }
 
   decoder.close();
   if (decodeError) throw decodeError;
+}
+
+export async function* decodeFramesWebCodecs(
+  videoFile: File,
+  signal: AbortSignal
+): AsyncGenerator<DecodedFrame> {
+  const buf = new Uint8Array(await videoFile.arrayBuffer());
+  const isMP4 = buf.length > 8 && buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70;
+
+  if (isMP4) {
+    const demuxed = demuxMP4(buf);
+    if (!demuxed) throw new Error('Failed to parse MP4');
+    const codec = 'avc1.' +
+      demuxed.avcC[1].toString(16).padStart(2, '0') +
+      demuxed.avcC[2].toString(16).padStart(2, '0') +
+      demuxed.avcC[3].toString(16).padStart(2, '0');
+    const desc = new ArrayBuffer(demuxed.avcC.length);
+    new Uint8Array(desc).set(demuxed.avcC);
+    const chunks = demuxed.samples.map(s => ({
+      data: buf.buffer.slice(s.offset, s.offset + s.size),
+      key: s.key,
+    }));
+    console.debug(`[WebCodecs] MP4: ${chunks.length} samples, codec: ${codec}`);
+    yield* decodeAndYield({ codec, description: desc }, chunks, signal);
+  } else {
+    // Try WebM
+    const webm = parseWebM(buf);
+    if (!webm || webm.tracks.length === 0) throw new Error('Unsupported format — please use MP4 (H.264) or WebM (VP8/VP9)');
+    const track = webm.tracks[0];
+    const isVP8 = track.codec.startsWith('V_VP8');
+    const codec = isVP8 ? 'vp8' : 'vp09.00.10.08';
+    const chunks: { data: ArrayBuffer; key: boolean }[] = [];
+    for (const cluster of webm.clusters) {
+      for (const block of cluster.blocks) {
+        if (block.length < 4) continue;
+        // SimpleBlock: track(VINT) + timecode(2B) + flags(1B) + data
+        const tkVint = readVINT(block, 0);
+        if (!tkVint) continue;
+        const flagsOff = tkVint.len + 2;
+        const dataOff = flagsOff + 1;
+        if (dataOff >= block.length) continue;
+        const key = (block[flagsOff] & 0x80) !== 0;
+        const frameData = block.slice(dataOff);
+        const ab = new ArrayBuffer(frameData.length);
+        new Uint8Array(ab).set(frameData);
+        chunks.push({ data: ab, key });
+      }
+    }
+    console.debug(`[WebCodecs] WebM: ${chunks.length} blocks, codec: ${codec}`);
+    yield* decodeAndYield({ codec }, chunks, signal);
+  }
 }
