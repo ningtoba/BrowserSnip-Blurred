@@ -2,12 +2,17 @@ function threads(): string {
   return Math.min(4, navigator.hardwareConcurrency || 2).toString();
 }
 
-export function reconstructCommand(
+export function reconstructCommandRaw(
   inputPattern: string,
   outputName: string,
-  fps: number
+  fps: number,
+  width: number,
+  height: number
 ): string[] {
   return [
+    '-f', 'rawvideo',
+    '-pixel_format', 'rgba',
+    '-video_size', `${width}x${height}`,
     '-framerate', fps.toString(),
     '-i', inputPattern,
     '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',

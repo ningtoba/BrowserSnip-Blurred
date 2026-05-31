@@ -8,11 +8,12 @@ import {
   getVideoMetadata,
 } from '@/lib/video/extract';
 import { clusterFaces, matchDetectionsToIdentities } from '@/lib/engine/clustering';
-import { reconstructVideo } from '@/lib/video/reconstruct';
+import { reconstructVideoRaw } from '@/lib/video/reconstruct';
 import { detectFaces } from '@/lib/engine/detection';
 import { recognizeFace } from '@/lib/engine/recognition';
 import { applyBlurToFrame } from '@/lib/engine/blur';
-import { SAMPLE_FPS, PHASE_WEIGHTS, BATCH_SIZE, DETECT_EVERY_N_FRAMES } from '@/lib/constants';
+import { computeIOU } from '@/lib/engine/tracking';
+import { SAMPLE_FPS, PHASE_WEIGHTS, DETECT_EVERY_N_FRAMES } from '@/lib/constants';
 import type { FaceDetection, DetectionBox, FaceIdentity, PipelinePhase } from '@/types';
 import { getFFmpeg } from '@/lib/ffmpeg/core';
 
@@ -160,7 +161,49 @@ export function usePipeline() {
     [setPhase, updateProgress, setDetectionsAndIdentities, setIdentityThumbnails, setError],
   );
 
-  const processAndExport = useCallback(async () => {
+  function matchToIdentitiesByIOU(
+  currentBoxes: DetectionBox[],
+  scanDetections: FaceDetection[],
+  identities: FaceIdentity[],
+  currentTimestamp: number,
+): Map<number, number> {
+  const matchMap = new Map<number, number>();
+
+  // Find the closest sample frame by timestamp
+  const sampleTimestamps = [...new Set(scanDetections.map((d) => d.frameTimestamp))].sort();
+  if (sampleTimestamps.length === 0) return matchMap;
+
+  let closestTs = sampleTimestamps[0];
+  let minDist = Math.abs(currentTimestamp - closestTs);
+  for (const ts of sampleTimestamps) {
+    const dist = Math.abs(currentTimestamp - ts);
+    if (dist < minDist) { minDist = dist; closestTs = ts; }
+  }
+
+  // Get identity-labeled detections from the closest sample frame
+  const sampleDets = scanDetections.filter((d) => d.frameTimestamp === closestTs && d.clusterId !== undefined);
+  if (sampleDets.length === 0) return matchMap;
+
+  // Match current boxes to sample detections via IOU
+  for (let ci = 0; ci < currentBoxes.length; ci++) {
+    let bestIOU = 0.3;
+    let bestId = -1;
+    for (const sd of sampleDets) {
+      const iou = computeIOU(currentBoxes[ci], sd);
+      if (iou > bestIOU) {
+        bestIOU = iou;
+        bestId = sd.clusterId!;
+      }
+    }
+    if (bestId >= 0) {
+      matchMap.set(ci, bestId);
+    }
+  }
+
+  return matchMap;
+}
+
+const processAndExport = useCallback(async () => {
     const state = useProcessStore.getState();
     const file = useFileStore.getState().file;
     const metadata = useFileStore.getState().metadata;
@@ -174,14 +217,14 @@ export function usePipeline() {
       const selectedIds = state.selectedIdentities;
       const blurConfig = state.blurConfig;
       const identities = state.identities;
+      const scanDetections = state.allDetections;
       const totalFrames = Math.ceil(metadata.duration * metadata.fps);
+      const { width, height } = metadata;
       const ffmpeg = await getFFmpeg();
 
       let globalFrameCount = 0;
       let lastBoxes: DetectionBox[] = [];
-      let lastDetections: FaceDetection[] = [];
-      const offscreen = new OffscreenCanvas(metadata.width, metadata.height);
-      const offCtx = offscreen.getContext('2d')!;
+      let lastMatchMap = new Map<number, number>();
 
       await extractFramesStreaming(
         file,
@@ -190,29 +233,19 @@ export function usePipeline() {
 
           const shouldDetect = globalFrameCount % DETECT_EVERY_N_FRAMES === 0;
           let boxes: DetectionBox[];
-          let detections: FaceDetection[];
+          let matchMap: Map<number, number>;
 
           if (shouldDetect) {
-            boxes = await detectFaces(imageData, metadata.width, metadata.height);
-            detections = boxes.map((box, di) => ({
-              ...box, frameIndex: di, frameTimestamp: timestamp,
-            }));
-
-            for (const det of detections) {
-              const emb = await recognizeFace(imageData, det, metadata.width, metadata.height);
-              if (emb) det.embedding = emb;
-            }
-
+            boxes = await detectFaces(imageData, width, height);
+            // Match via IOU to scan identities — no MFN inference needed
+            matchMap = matchToIdentitiesByIOU(boxes, scanDetections, identities, timestamp);
             lastBoxes = boxes;
-            lastDetections = detections;
+            lastMatchMap = matchMap;
           } else {
             boxes = lastBoxes.map((b) => ({ ...b }));
-            detections = lastDetections.map((d) => ({
-              ...d, frameIndex: globalFrameCount, frameTimestamp: timestamp,
-            }));
+            matchMap = lastMatchMap;
           }
 
-          const matchMap = matchDetectionsToIdentities(detections, identities);
           const targetIndices = new Set<number>();
           for (const [detIdx, clusterId] of matchMap) {
             if (selectedIds.has(clusterId)) targetIndices.add(detIdx);
@@ -223,10 +256,9 @@ export function usePipeline() {
             outputData = await applyBlurToFrame(imageData, boxes, targetIndices, blurConfig.type);
           }
 
-          const pngName = `frame_${String(globalFrameCount + 1).padStart(4, '0')}.png`;
-          offCtx.putImageData(outputData, 0, 0);
-          const blob = await offscreen.convertToBlob({ type: 'image/png' });
-          await ffmpeg.writeFile(pngName, new Uint8Array(await blob.arrayBuffer()));
+          // Write raw RGBA — no PNG encoding overhead
+          const rawName = `frame_${String(globalFrameCount + 1).padStart(4, '0')}.rgba`;
+          await ffmpeg.writeFile(rawName, new Uint8Array(outputData.data.buffer, outputData.data.byteOffset, outputData.data.byteLength));
 
           globalFrameCount++;
 
@@ -252,7 +284,7 @@ export function usePipeline() {
         overallPercent: computeOverallPercent('reconstructing', 0),
       });
 
-      const blob = await reconstructVideo(globalFrameCount, metadata, (desc, pct) => {
+      const blob = await reconstructVideoRaw(globalFrameCount, metadata, (desc, pct) => {
         updateProgress({
           phaseDescription: desc, phasePercent: pct,
           overallPercent: computeOverallPercent('reconstructing', pct),

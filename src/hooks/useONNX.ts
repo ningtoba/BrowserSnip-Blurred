@@ -49,12 +49,14 @@ export function useONNX(): ONNXState {
     }
 
     const detBackend = getBackend('yunet');
+    const mfnBackend = getBackend('mfn');
+    const gpuOk = detBackend === 'webgpu';
     setState((s) => ({
       ...s,
-      gpuAccelerated: detBackend === 'webgpu',
-      loadingMessage: detBackend === 'webgpu'
-        ? 'Initializing WebGPU inference engine...'
-        : 'Initializing CPU inference engine (slower)...',
+      gpuAccelerated: gpuOk,
+      loadingMessage: gpuOk
+        ? 'WebGPU active — inference on GPU'
+        : `Inference on ${detBackend ?? 'CPU'} (WebGPU unavailable for detection)`,
       loadingPercent: 80,
     }));
 
