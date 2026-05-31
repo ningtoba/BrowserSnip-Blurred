@@ -245,11 +245,14 @@ const processAndExport = useCallback(async () => {
 
       let globalFrameCount = 0;
       let lastBoxes: DetectionBox[] = [];
+      let prevBoxes: DetectionBox[] = [];
       let lastMatchMap = new Map<number, number>();
+      let lastDetFrame = 0;
+      const jpgCanvas = new OffscreenCanvas(width, height);
+      const jpgCtx = jpgCanvas.getContext('2d', { willReadFrequently: true })!;
 
       console.time('total-processing');
 
-      // Seek-based: processes every frame, decoder advances sequentially
       await extractFramesSeeking(
         file,
         async (imageData, timestamp, _index) => {
@@ -261,7 +264,7 @@ const processAndExport = useCallback(async () => {
 
           if (shouldDetect) {
             boxes = await detectFaces(imageData, width, height);
-            // Chain identities: first match to scan, then propagate frame-to-frame
+            // Chain identities frame-to-frame via IOU
             if (lastMatchMap.size === 0) {
               matchMap = matchToIdentitiesByIOU(boxes, scanDetections, identities, timestamp);
             } else {
@@ -278,7 +281,6 @@ const processAndExport = useCallback(async () => {
                 }
                 if (bestId >= 0) matchMap.set(ci, bestId);
               }
-              // For unmatched boxes, try scan identities as fallback
               if (matchMap.size < boxes.length) {
                 const scanMatch = matchToIdentitiesByIOU(boxes, scanDetections, identities, timestamp);
                 for (const [ci, id] of scanMatch) {
@@ -286,10 +288,28 @@ const processAndExport = useCallback(async () => {
                 }
               }
             }
+            // Save velocity reference for interpolation
+            prevBoxes = lastBoxes.length === boxes.length ? lastBoxes : boxes;
             lastBoxes = boxes;
             lastMatchMap = matchMap;
+            lastDetFrame = globalFrameCount;
           } else {
-            boxes = lastBoxes.map((b) => ({ ...b }));
+            // Interpolate bboxes using velocity from last detection
+            const dt = globalFrameCount - lastDetFrame;
+            const totalSteps = DETECT_EVERY_N_FRAMES;
+            const t = dt / totalSteps;
+            boxes = lastBoxes.map((b, i) => {
+              if (i < prevBoxes.length && prevBoxes[i]) {
+                return {
+                  x1: b.x1 + (b.x1 - prevBoxes[i].x1) * t,
+                  y1: b.y1 + (b.y1 - prevBoxes[i].y1) * t,
+                  x2: b.x2 + (b.x2 - prevBoxes[i].x2) * t,
+                  y2: b.y2 + (b.y2 - prevBoxes[i].y2) * t,
+                  confidence: b.confidence,
+                };
+              }
+              return { ...b };
+            });
             matchMap = lastMatchMap;
           }
 
@@ -303,12 +323,10 @@ const processAndExport = useCallback(async () => {
             outputData = cpuBlurFrame(imageData, boxes, targetIndices, blurConfig.type);
           }
 
-          // Write as JPEG — ~200KB vs 8MB raw, fits easily in MEMFS
+          // Write JPEG — reuse single canvas
           const jpgName = `frame_${String(globalFrameCount + 1).padStart(4, '0')}.jpg`;
-          const tmpCanvas = new OffscreenCanvas(width, height);
-          const tmpCtx = tmpCanvas.getContext('2d', { willReadFrequently: true })!;
-          tmpCtx.putImageData(outputData, 0, 0);
-          const blob = await tmpCanvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
+          jpgCtx.putImageData(outputData, 0, 0);
+          const blob = await jpgCanvas.convertToBlob({ type: 'image/jpeg', quality: 0.75 });
           await ffmpeg.writeFile(jpgName, new Uint8Array(await blob.arrayBuffer()));
 
           globalFrameCount++;
