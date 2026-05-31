@@ -8,10 +8,10 @@ import {
   getVideoMetadata,
 } from '@/lib/video/extract';
 import { clusterFaces, matchDetectionsToIdentities } from '@/lib/engine/clustering';
-import { reconstructVideoRaw } from '@/lib/video/reconstruct';
+// reconstructVideoRaw inlined for batch processing
 import { detectFaces } from '@/lib/engine/detection';
 import { recognizeFace } from '@/lib/engine/recognition';
-import { applyBlurToFrame } from '@/lib/engine/blur';
+import { applyPixelateBlur, applyEyeBarBlur } from '@/lib/engine/blur';
 import { computeIOU } from '@/lib/engine/tracking';
 import { SAMPLE_FPS, PHASE_WEIGHTS, DETECT_EVERY_N_FRAMES } from '@/lib/constants';
 import type { FaceDetection, DetectionBox, FaceIdentity, PipelinePhase } from '@/types';
@@ -203,6 +203,64 @@ export function usePipeline() {
   return matchMap;
 }
 
+const PROCESS_BATCH = 50;
+
+function cpuBlurFrame(
+  imageData: ImageData,
+  boxes: DetectionBox[],
+  targetIndices: Set<number>,
+  blurType: 'pixelate' | 'eye-bar'
+): ImageData {
+  const canvas = new OffscreenCanvas(imageData.width, imageData.height);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+  ctx.putImageData(imageData, 0, 0);
+
+  for (const idx of targetIndices) {
+    if (blurType === 'pixelate') {
+      applyPixelateBlur(ctx, boxes[idx]);
+    } else {
+      applyEyeBarBlur(ctx, boxes[idx]);
+    }
+  }
+
+  return ctx.getImageData(0, 0, imageData.width, imageData.height);
+}
+
+async function encodeSegment(
+  ffmpeg: Awaited<ReturnType<typeof getFFmpeg>>,
+  startFrame: number,
+  endFrame: number,
+  fps: number,
+  width: number,
+  height: number,
+  segIndex: number
+): Promise<string> {
+  const segName = `seg_${segIndex}.mp4`;
+  await ffmpeg.exec(
+    [
+      '-start_number', startFrame.toString(),
+      '-f', 'rawvideo',
+      '-pixel_format', 'rgba',
+      '-video_size', `${width}x${height}`,
+      '-framerate', fps.toString(),
+      '-i', 'frame_%04d.rgba',
+      '-frames:v', (endFrame - startFrame + 1).toString(),
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+      '-pix_fmt', 'yuv420p',
+      '-movflags', '+faststart',
+      segName,
+    ],
+    300_000
+  );
+
+  // Delete raw frame files for this segment to free MEMFS space
+  for (let f = startFrame; f <= endFrame; f++) {
+    try { await ffmpeg.deleteFile(`frame_${String(f).padStart(4, '0')}.rgba`); } catch { /* ignore */ }
+  }
+
+  return segName;
+}
+
 const processAndExport = useCallback(async () => {
     const state = useProcessStore.getState();
     const file = useFileStore.getState().file;
@@ -219,12 +277,15 @@ const processAndExport = useCallback(async () => {
       const identities = state.identities;
       const scanDetections = state.allDetections;
       const totalFrames = Math.ceil(metadata.duration * metadata.fps);
-      const { width, height } = metadata;
+      const { width, height, fps } = metadata;
       const ffmpeg = await getFFmpeg();
 
       let globalFrameCount = 0;
+      let batchStart = 1;
+      let segIndex = 1;
       let lastBoxes: DetectionBox[] = [];
       let lastMatchMap = new Map<number, number>();
+      const segmentFiles: string[] = [];
 
       console.time('total-processing');
 
@@ -233,15 +294,12 @@ const processAndExport = useCallback(async () => {
         async (imageData, timestamp, _index) => {
           if (signal.aborted) return false;
 
-          const t0 = performance.now();
           const shouldDetect = globalFrameCount % DETECT_EVERY_N_FRAMES === 0;
           let boxes: DetectionBox[];
           let matchMap: Map<number, number>;
 
           if (shouldDetect) {
-            const tDet = performance.now();
             boxes = await detectFaces(imageData, width, height);
-            console.debug(`[frame ${globalFrameCount}] detectFaces: ${(performance.now() - tDet).toFixed(1)}ms, found ${boxes.length} faces`);
             matchMap = matchToIdentitiesByIOU(boxes, scanDetections, identities, timestamp);
             lastBoxes = boxes;
             lastMatchMap = matchMap;
@@ -257,18 +315,22 @@ const processAndExport = useCallback(async () => {
 
           let outputData = imageData;
           if (targetIndices.size > 0) {
-            const tBlur = performance.now();
-            outputData = await applyBlurToFrame(imageData, boxes, targetIndices, blurConfig.type);
-            console.debug(`[frame ${globalFrameCount}] blur: ${(performance.now() - tBlur).toFixed(1)}ms`);
+            outputData = cpuBlurFrame(imageData, boxes, targetIndices, blurConfig.type);
           }
 
-          const tWrite = performance.now();
           const rawName = `frame_${String(globalFrameCount + 1).padStart(4, '0')}.rgba`;
           await ffmpeg.writeFile(rawName, new Uint8Array(outputData.data.buffer, outputData.data.byteOffset, outputData.data.byteLength));
-          const writeMs = performance.now() - tWrite;
-          console.debug(`[frame ${globalFrameCount}] total: ${(performance.now() - t0).toFixed(1)}ms (write: ${writeMs.toFixed(1)}ms)`);
 
           globalFrameCount++;
+
+          // Encode batch when we reach PROCESS_BATCH frames
+          if (globalFrameCount % PROCESS_BATCH === 0) {
+            const batchEnd = globalFrameCount;
+            const seg = await encodeSegment(ffmpeg, batchStart, batchEnd, fps, width, height, segIndex);
+            segmentFiles.push(seg);
+            batchStart = batchEnd + 1;
+            segIndex++;
+          }
 
           const pct = Math.round((globalFrameCount / totalFrames) * 100);
           updateProgress({
@@ -283,25 +345,43 @@ const processAndExport = useCallback(async () => {
         signal,
       );
 
+      // Encode remaining frames
+      if (globalFrameCount >= batchStart && !signal.aborted) {
+        const seg = await encodeSegment(ffmpeg, batchStart, globalFrameCount, fps, width, height, segIndex);
+        segmentFiles.push(seg);
+      }
+
       console.timeEnd('total-processing');
 
       if (signal.aborted) return;
 
       setPhase('reconstructing');
       updateProgress({
-        phaseDescription: 'Encoding final video...',
-        phasePercent: 0,
-        overallPercent: computeOverallPercent('reconstructing', 0),
+        phaseDescription: 'Concatenating segments...',
+        phasePercent: 50,
+        overallPercent: computeOverallPercent('reconstructing', 50),
       });
 
-      const blob = await reconstructVideoRaw(globalFrameCount, metadata, (desc, pct) => {
-        updateProgress({
-          phaseDescription: desc, phasePercent: pct,
-          overallPercent: computeOverallPercent('reconstructing', pct),
-        });
-      });
+      // Concat all segments
+      if (segmentFiles.length === 1) {
+        const data = await ffmpeg.readFile(segmentFiles[0]);
+        setOutput(new Blob([data], { type: 'video/mp4' }), URL.createObjectURL(new Blob([data], { type: 'video/mp4' })));
+      } else {
+        const concatContent = segmentFiles.map((s) => `file '${s}'`).join('\n');
+        await ffmpeg.writeFile('concat_list.txt', concatContent);
+        await ffmpeg.exec(
+          ['-f', 'concat', '-safe', '0', '-i', 'concat_list.txt', '-c', 'copy', '-movflags', '+faststart', 'output.mp4'],
+          600_000
+        );
+        const data = await ffmpeg.readFile('output.mp4');
+        setOutput(new Blob([data], { type: 'video/mp4' }), URL.createObjectURL(new Blob([data], { type: 'video/mp4' })));
 
-      setOutput(blob, URL.createObjectURL(blob));
+        // Cleanup
+        for (const seg of segmentFiles) {
+          try { await ffmpeg.deleteFile(seg); } catch { /* ignore */ }
+        }
+        try { await ffmpeg.deleteFile('concat_list.txt'); } catch { /* ignore */ }
+      }
     } catch (err) {
       if (!signal.aborted) setError(err instanceof Error ? err.message : 'Processing failed');
     }
