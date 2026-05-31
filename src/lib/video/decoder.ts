@@ -161,16 +161,20 @@ export async function* decodeFramesWebCodecs(
 
   decoder.configure(config);
 
-  // Feed NAL units as individual frames
+  // Feed NAL units — only start from the first IDR (keyframe)
   let timestamp = 0;
   const frameIntervalUs = 33_333;
+  let foundFirstKeyframe = false;
 
   for (const sample of samples) {
     if (signal.aborted) break;
     if (sample.type === 'sps' || sample.type === 'pps') continue;
     if (sample.data.length === 0) continue;
 
-    // Create a detached ArrayBuffer copy to avoid shared-buffer issues
+    // Skip non-IDR frames before the first keyframe
+    if (!foundFirstKeyframe && sample.type !== 'idr') continue;
+    foundFirstKeyframe = true;
+
     const chunkBuf = new ArrayBuffer(sample.data.length);
     new Uint8Array(chunkBuf).set(sample.data);
 
@@ -182,6 +186,8 @@ export async function* decodeFramesWebCodecs(
     }));
     timestamp += frameIntervalUs;
   }
+
+  if (!foundFirstKeyframe) throw new Error('No keyframe found in bitstream');
 
   await decoder.flush();
 

@@ -322,21 +322,19 @@ const processAndExport = useCallback(async () => {
             lastBoxes = boxes;
             lastMatchMap = matchMap;
             lastDetFrame = globalFrameCount;
-          } else {
+          } else if (lastBoxes.length === prevBoxes.length) {
             const dt = globalFrameCount - lastDetFrame;
             const t = dt / DETECT_EVERY_N_FRAMES;
-            boxes = lastBoxes.map((b, i) => {
-              if (i < prevBoxes.length && prevBoxes[i]) {
-                return {
-                  x1: b.x1 + (b.x1 - prevBoxes[i].x1) * t,
-                  y1: b.y1 + (b.y1 - prevBoxes[i].y1) * t,
-                  x2: b.x2 + (b.x2 - prevBoxes[i].x2) * t,
-                  y2: b.y2 + (b.y2 - prevBoxes[i].y2) * t,
-                  confidence: b.confidence,
-                };
-              }
-              return { ...b };
-            });
+            boxes = lastBoxes.map((b, i) => ({
+              x1: b.x1 + (b.x1 - prevBoxes[i].x1) * t,
+              y1: b.y1 + (b.y1 - prevBoxes[i].y1) * t,
+              x2: b.x2 + (b.x2 - prevBoxes[i].x2) * t,
+              y2: b.y2 + (b.y2 - prevBoxes[i].y2) * t,
+              confidence: b.confidence,
+            }));
+            matchMap = lastMatchMap;
+          } else {
+            boxes = lastBoxes.map((b) => ({ ...b }));
             matchMap = lastMatchMap;
           }
 
