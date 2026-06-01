@@ -258,11 +258,7 @@ const processAndExport = useCallback(async () => {
       const ffmpeg = await getFFmpeg();
 
       let globalFrameCount = 0;
-      let lastBoxes: DetectionBox[] = [];
-      let prevBoxes: DetectionBox[] = [];
-      let lastDetFrame = 0;
       // Persistent map: identity clusterId → last known box position.
-      // Prevents flickering when detection misses a face on some frames.
       const identityBoxes = new Map<number, DetectionBox>();
       const jpgCanvas = new OffscreenCanvas(width, height);
       const jpgCtx = jpgCanvas.getContext('2d', { willReadFrequently: true })!;
@@ -284,8 +280,7 @@ const processAndExport = useCallback(async () => {
             try { await ffmpeg.deleteFile(`frame_${String(f).padStart(4, '0')}.jpg`); } catch { /* ignore */ }
           }
           globalFrameCount = 0;
-          lastBoxes = []; prevBoxes = [];
-          identityBoxes.clear(); lastDetFrame = 0;
+          identityBoxes.clear();
           await extractFramesSeeking(file, async (imageData, timestamp) => {
             if (signal.aborted) return false;
             await processFrame(imageData, timestamp);
@@ -309,84 +304,47 @@ const processAndExport = useCallback(async () => {
           if (shouldDetect) {
             const detectedBoxes = await detectFaces(imageData, width, height);
 
-            // --- One-to-one matching: detections ↔ identityBoxes ---
-            const detToId = new Map<number, number>();
-            const matchedIdSet = new Set<number>();
-            const usedDets = new Set<number>();
-
-            // Greedy IOU matching (highest IOU first)
-            const pairs: { ci: number; id: number; iou: number }[] = [];
+            // One-to-one greedy IOU matching: detected boxes ↔ tracked identities
+            const pairs: { detIdx: number; id: number; iou: number }[] = [];
             for (let ci = 0; ci < detectedBoxes.length; ci++) {
               for (const [id, box] of identityBoxes) {
                 const iou = computeIOU(detectedBoxes[ci], box);
-                if (iou > 0.25) pairs.push({ ci, id, iou });
+                if (iou > 0.2) pairs.push({ detIdx: ci, id, iou });
               }
             }
             pairs.sort((a, b) => b.iou - a.iou);
+
+            const matchedDets = new Set<number>();
+            const matchedIds = new Set<number>();
             for (const p of pairs) {
-              if (!usedDets.has(p.ci) && !matchedIdSet.has(p.id)) {
-                detToId.set(p.ci, p.id);
-                matchedIdSet.add(p.id);
-                usedDets.add(p.ci);
+              if (!matchedDets.has(p.detIdx) && !matchedIds.has(p.id)) {
+                identityBoxes.set(p.id, detectedBoxes[p.detIdx]);
+                matchedDets.add(p.detIdx);
+                matchedIds.add(p.id);
               }
             }
 
-            // Update matched identities with new positions
-            for (const [ci, id] of detToId) {
-              identityBoxes.set(id, detectedBoxes[ci]);
-            }
-
-            // For unmatched detections, try scan-phase identity matching
+            // Unmatched detections: try scan-phase identity matching (one-time only)
             for (let ci = 0; ci < detectedBoxes.length; ci++) {
-              if (usedDets.has(ci)) continue;
-              let bestIOU = 0.3;
+              if (matchedDets.has(ci)) continue;
+              let bestIOU = 0.35;
               let bestId = -1;
               for (const det of scanDetections) {
-                if (det.clusterId === undefined || matchedIdSet.has(det.clusterId)) continue;
+                if (det.clusterId === undefined || matchedIds.has(det.clusterId)) continue;
                 const iou = computeIOU(detectedBoxes[ci], det);
                 if (iou > bestIOU) { bestIOU = iou; bestId = det.clusterId!; }
               }
-              if (bestId >= 0) {
+              if (bestId >= 0 && selectedIds.has(bestId)) {
                 identityBoxes.set(bestId, detectedBoxes[ci]);
-                matchedIdSet.add(bestId);
-                usedDets.add(ci);
+                matchedIds.add(bestId);
               }
             }
 
-            // Unmatched selected identities keep their last known position (persistence)
-
-            prevBoxes = lastBoxes;
-            lastBoxes = detectedBoxes;
-            lastDetFrame = globalFrameCount;
-          } else if (lastBoxes.length > 0 && prevBoxes.length === lastBoxes.length) {
-            // Interpolate per-identity between last two detection positions
-            const t = Math.min(1, (globalFrameCount - lastDetFrame) / DETECT_EVERY_N_FRAMES);
-            const entries = Array.from(identityBoxes.entries());
-            for (let ii = 0; ii < entries.length; ii++) {
-              const [id, box] = entries[ii];
-              // Find the closest lastBox to this identity's current position
-              let bestIdx = 0, bestDist = Infinity;
-              for (let j = 0; j < lastBoxes.length; j++) {
-                const dx = (lastBoxes[j].x1 + lastBoxes[j].x2) / 2 - (box.x1 + box.x2) / 2;
-                const dy = (lastBoxes[j].y1 + lastBoxes[j].y2) / 2 - (box.y1 + box.y2) / 2;
-                const dist = dx * dx + dy * dy;
-                if (dist < bestDist) { bestDist = dist; bestIdx = j; }
-              }
-              if (bestIdx < prevBoxes.length) {
-                const b = lastBoxes[bestIdx];
-                const p = prevBoxes[bestIdx];
-                identityBoxes.set(id, {
-                  x1: b.x1 + (b.x1 - p.x1) * t,
-                  y1: b.y1 + (b.y1 - p.y1) * t,
-                  x2: b.x2 + (b.x2 - p.x2) * t,
-                  y2: b.y2 + (b.y2 - p.y2) * t,
-                  confidence: b.confidence,
-                });
-              }
-            }
+            // Unmatched identities keep their last known position (no interpolation)
           }
+          // On non-detection frames: identityBoxes persists unchanged
 
-          // Build boxes + target indices from persistent identity map
+          // Build boxes + target indices from identity map
           const boxes: DetectionBox[] = [];
           const targetIndices = new Set<number>();
           for (const [id, box] of identityBoxes) {
@@ -402,7 +360,7 @@ const processAndExport = useCallback(async () => {
 
           const jpgName = `frame_${String(globalFrameCount + 1).padStart(4, '0')}.jpg`;
           jpgCtx.putImageData(outputData, 0, 0);
-          const blob = await jpgCanvas.convertToBlob({ type: 'image/jpeg', quality: 0.5 });
+          const blob = await jpgCanvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
           await ffmpeg.writeFile(jpgName, new Uint8Array(await blob.arrayBuffer()));
 
           globalFrameCount++;
@@ -435,7 +393,7 @@ const processAndExport = useCallback(async () => {
         [
           '-framerate', fps.toString(),
           '-i', 'frame_%04d.jpg',
-          '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+          '-c:v', 'libx264', '-preset', 'fast', '-crf', '26',
           '-pix_fmt', 'yuv420p',
           '-threads', Math.min(4, navigator.hardwareConcurrency || 2).toString(),
           '-movflags', '+faststart',
