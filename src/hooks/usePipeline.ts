@@ -14,7 +14,7 @@ import { detectFaces } from '@/lib/engine/detection';
 import { recognizeFace } from '@/lib/engine/recognition';
 import { applyPixelateBlur, applyEyeBarBlur, applyBlackBoxBlur } from '@/lib/engine/blur';
 import { KalmanBox } from '@/lib/engine/kalman';
-import { hungarianMatch } from '@/lib/engine/hungarian';
+import { matchDetectionsToTracks } from '@/lib/engine/match';
 import { computeIOU } from '@/lib/engine/tracking';
 import { SAMPLE_FPS, PHASE_WEIGHTS, DETECT_EVERY_N_FRAMES } from '@/lib/constants';
 import type { FaceDetection, DetectionBox, FaceIdentity, PipelinePhase, BlurType } from '@/types';
@@ -324,32 +324,16 @@ const processAndExport = useCallback(async () => {
               predictedBoxes.push(identityKalman.get(id)!.predict());
             }
 
-            // ── Step 2: Hungarian matching (globally optimal one-to-one) ──
+            // ── Step 2: One-to-one matching (greedy by IOU, best-first) ──
             const matchedDets = new Set<number>();
             const matchedIds = new Set<number>();
 
             if (trackedIds.length > 0 && detectedBoxes.length > 0) {
-              // Build cost matrix: cost = 1 - IOU (lower = better match)
-              const costMatrix: number[][] = [];
-              const iouThreshold = 0.05; // very lenient — let Hungarian find the best assignment
-              for (let di = 0; di < detectedBoxes.length; di++) {
-                const row: number[] = [];
-                for (let ti = 0; ti < trackedIds.length; ti++) {
-                  const iou = computeIOU(detectedBoxes[di], predictedBoxes[ti]);
-                  row.push(iou >= iouThreshold ? 1 - iou : 1000); // 1000 = impossible match
-                }
-                costMatrix.push(row);
-              }
-
-              const matches = hungarianMatch(costMatrix);
+              const matches = matchDetectionsToTracks(detectedBoxes, predictedBoxes, 0.1);
               for (const m of matches) {
-                const detIdx = m.row;
-                const trackIdx = m.col;
-                if (costMatrix[detIdx][trackIdx] >= 1000) continue; // skip impossible matches
-
-                const id = trackedIds[trackIdx];
-                identityKalman.get(id)!.update(detectedBoxes[detIdx]);
-                matchedDets.add(detIdx);
+                const id = trackedIds[m.trackIdx];
+                identityKalman.get(id)!.update(detectedBoxes[m.detIdx]);
+                matchedDets.add(m.detIdx);
                 matchedIds.add(id);
               }
             }
