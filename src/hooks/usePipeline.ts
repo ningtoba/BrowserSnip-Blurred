@@ -215,10 +215,23 @@ function cpuBlurFrame(
   ctx.putImageData(imageData, 0, 0);
 
   for (const idx of targetIndices) {
+    const bbox = boxes[idx];
+    // Clamp bbox to image boundaries to prevent black out-of-bounds pixels
+    const clamped: DetectionBox = {
+      x1: Math.max(0, bbox.x1),
+      y1: Math.max(0, bbox.y1),
+      x2: Math.min(imageData.width, bbox.x2),
+      y2: Math.min(imageData.height, bbox.y2),
+      confidence: bbox.confidence,
+    };
+    const w = clamped.x2 - clamped.x1;
+    const h = clamped.y2 - clamped.y1;
+    if (w < 2 || h < 2) continue; // skip degenerate boxes
+
     if (blurType === 'pixelate') {
-      applyPixelateBlur(ctx, boxes[idx]);
+      applyPixelateBlur(ctx, clamped);
     } else {
-      applyEyeBarBlur(ctx, boxes[idx]);
+      applyEyeBarBlur(ctx, clamped);
     }
   }
 
@@ -247,8 +260,10 @@ const processAndExport = useCallback(async () => {
       let globalFrameCount = 0;
       let lastBoxes: DetectionBox[] = [];
       let prevBoxes: DetectionBox[] = [];
-      let lastMatchMap = new Map<number, number>();
       let lastDetFrame = 0;
+      // Persistent map: identity clusterId → last known box position.
+      // Prevents flickering when detection misses a face on some frames.
+      const identityBoxes = new Map<number, DetectionBox>();
       const jpgCanvas = new OffscreenCanvas(width, height);
       const jpgCtx = jpgCanvas.getContext('2d', { willReadFrequently: true })!;
 
@@ -270,7 +285,7 @@ const processAndExport = useCallback(async () => {
           }
           globalFrameCount = 0;
           lastBoxes = []; prevBoxes = [];
-          lastMatchMap = new Map(); lastDetFrame = 0;
+          identityBoxes.clear(); lastDetFrame = 0;
           await extractFramesSeeking(file, async (imageData, timestamp) => {
             if (signal.aborted) return false;
             await processFrame(imageData, timestamp);
@@ -290,57 +305,96 @@ const processAndExport = useCallback(async () => {
           if (signal.aborted) return;
 
           const shouldDetect = globalFrameCount % DETECT_EVERY_N_FRAMES === 0;
-          let boxes: DetectionBox[];
-          let matchMap: Map<number, number>;
 
           if (shouldDetect) {
-            boxes = await detectFaces(imageData, width, height);
-            if (lastMatchMap.size === 0) {
-              matchMap = matchToIdentitiesByIOU(boxes, scanDetections, identities, timestamp);
-            } else {
-              matchMap = new Map();
-              for (let ci = 0; ci < boxes.length; ci++) {
+            const detectedBoxes = await detectFaces(imageData, width, height);
+
+            // Match new detections to previous detections via IOU for tracking
+            const iouMatch = new Map<number, number>(); // newIdx → oldIdx
+            if (lastBoxes.length > 0) {
+              for (let ci = 0; ci < detectedBoxes.length; ci++) {
                 let bestIOU = 0.25;
-                let bestId = -1;
+                let bestPi = -1;
                 for (let pi = 0; pi < lastBoxes.length; pi++) {
-                  const iou = computeIOU(boxes[ci], lastBoxes[pi]);
-                  if (iou > bestIOU && lastMatchMap.has(pi)) {
-                    bestIOU = iou;
-                    bestId = lastMatchMap.get(pi)!;
-                  }
+                  const iou = computeIOU(detectedBoxes[ci], lastBoxes[pi]);
+                  if (iou > bestIOU) { bestIOU = iou; bestPi = pi; }
                 }
-                if (bestId >= 0) matchMap.set(ci, bestId);
-              }
-              if (matchMap.size < boxes.length) {
-                const scanMatch = matchToIdentitiesByIOU(boxes, scanDetections, identities, timestamp);
-                for (const [ci, id] of scanMatch) {
-                  if (!matchMap.has(ci)) matchMap.set(ci, id);
-                }
+                if (bestPi >= 0) iouMatch.set(ci, bestPi);
               }
             }
-            prevBoxes = lastBoxes.length === boxes.length ? lastBoxes : boxes;
-            lastBoxes = boxes;
-            lastMatchMap = matchMap;
+
+            // Build identity → box mapping
+            // First: match new detections to known identities via IOU to last position
+            const newIdentityBoxes = new Map<number, DetectionBox>();
+            for (let ci = 0; ci < detectedBoxes.length; ci++) {
+              let identityId = -1;
+
+              // Try tracking from previous frame via IOU match
+              const pi = iouMatch.get(ci);
+              if (pi !== undefined) {
+                // Find which identity the previous box belonged to
+                for (const [id, box] of identityBoxes) {
+                  if (computeIOU(lastBoxes[pi], box) > 0.2) {
+                    identityId = id;
+                    break;
+                  }
+                }
+              }
+
+              // Fallback: match to scan-phase identities
+              if (identityId < 0) {
+                let bestIOU = 0.3;
+                for (const det of scanDetections) {
+                  if (det.clusterId === undefined) continue;
+                  const iou = computeIOU(detectedBoxes[ci], det);
+                  if (iou > bestIOU) { bestIOU = iou; identityId = det.clusterId!; }
+                }
+              }
+
+              if (identityId >= 0) {
+                newIdentityBoxes.set(identityId, detectedBoxes[ci]);
+              }
+            }
+
+            // Update persistent map: keep existing identities, update with new positions
+            for (const [id, box] of newIdentityBoxes) {
+              identityBoxes.set(id, box);
+            }
+            // Note: identities NOT in newIdentityBoxes keep their last known position
+            // (identityBoxes persists). This prevents flickering when detection misses.
+
+            prevBoxes = lastBoxes.length === detectedBoxes.length ? lastBoxes : detectedBoxes;
+            lastBoxes = detectedBoxes;
             lastDetFrame = globalFrameCount;
-          } else if (lastBoxes.length === prevBoxes.length) {
-            const dt = globalFrameCount - lastDetFrame;
-            const t = dt / DETECT_EVERY_N_FRAMES;
-            boxes = lastBoxes.map((b, i) => ({
+          } else if (lastBoxes.length > 0 && prevBoxes.length === lastBoxes.length) {
+            // Interpolate between last two detection positions (clamped, no extrapolation)
+            const t = Math.min(1, (globalFrameCount - lastDetFrame) / DETECT_EVERY_N_FRAMES);
+            const interpolated = lastBoxes.map((b, i) => ({
               x1: b.x1 + (b.x1 - prevBoxes[i].x1) * t,
               y1: b.y1 + (b.y1 - prevBoxes[i].y1) * t,
               x2: b.x2 + (b.x2 - prevBoxes[i].x2) * t,
               y2: b.y2 + (b.y2 - prevBoxes[i].y2) * t,
               confidence: b.confidence,
             }));
-            matchMap = lastMatchMap;
-          } else {
-            boxes = lastBoxes.map((b) => ({ ...b }));
-            matchMap = lastMatchMap;
-          }
 
+            // Update identity boxes with interpolated positions
+            let ii = 0;
+            for (const [id] of identityBoxes) {
+              if (ii < interpolated.length) {
+                identityBoxes.set(id, interpolated[ii]);
+              }
+              ii++;
+            }
+          }
+          // else: no detections yet, identityBoxes keeps its state
+
+          // Build boxes array and target indices from persistent identity map
+          const boxes: DetectionBox[] = [];
           const targetIndices = new Set<number>();
-          for (const [detIdx, clusterId] of matchMap) {
-            if (selectedIds.has(clusterId)) targetIndices.add(detIdx);
+          for (const [id, box] of identityBoxes) {
+            const idx = boxes.length;
+            boxes.push(box);
+            if (selectedIds.has(id)) targetIndices.add(idx);
           }
 
           let outputData = imageData;
