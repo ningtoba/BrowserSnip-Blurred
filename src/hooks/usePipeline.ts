@@ -12,6 +12,7 @@ import { clusterFaces } from '@/lib/engine/clustering';
 // reconstructVideoRaw inlined for batch processing
 import { detectFaces } from '@/lib/engine/detection';
 import { recognizeFace } from '@/lib/engine/recognition';
+import { cosineSimilarity } from '@/lib/utils/math';
 import { applyPixelateBlur, applyEyeBarBlur, applyBlackBoxBlur } from '@/lib/engine/blur';
 import { KalmanBox } from '@/lib/engine/kalman';
 import { matchDetectionsToTracks } from '@/lib/engine/match';
@@ -269,6 +270,11 @@ const processAndExport = useCallback(async () => {
       let globalFrameCount = 0;
       // Per-identity Kalman filter tracking.
       const identityKalman = new Map<number, import('@/lib/engine/kalman').KalmanBox>();
+      // Per-identity face embeddings from scan phase (for appearance-based matching)
+      const identityEmbeddings = new Map<number, Float32Array>();
+      for (const id of identities) {
+        if (id.averageEmbedding) identityEmbeddings.set(id.id, id.averageEmbedding);
+      }
       const jpgCanvas = new OffscreenCanvas(width, height);
       const jpgCtx = jpgCanvas.getContext('2d', { willReadFrequently: true })!;
 
@@ -349,11 +355,10 @@ const processAndExport = useCallback(async () => {
               }
             }
 
-            // ── Step 4: Unmatched detections → scan-phase identity matching ──
-            // This re-links faces that reappear after occlusion (face turns away and back).
+            // ── Step 4: Unmatched detections → scan-phase IOU matching ──
             for (let ci = 0; ci < detectedBoxes.length; ci++) {
               if (matchedDets.has(ci)) continue;
-              let bestIOU = 0.2;
+              let bestIOU = 0.15;
               let bestId = -1;
               for (const det of scanDetections) {
                 if (det.clusterId === undefined) continue;
@@ -366,6 +371,38 @@ const processAndExport = useCallback(async () => {
                 identityKalman.set(bestId, new KalmanBox(detectedBoxes[ci]));
                 matchedIds.add(bestId);
                 matchedDets.add(ci);
+              }
+            }
+
+            // ── Step 5: Embedding-based re-identification ──
+            // For still-unmatched detections, extract face embedding and compare
+            // to scan-phase identity embeddings. This handles cases where IOU fails
+            // (face moved far, camera panned, face turned and came back).
+            if (identityEmbeddings.size > 0) {
+              for (let ci = 0; ci < detectedBoxes.length; ci++) {
+                if (matchedDets.has(ci)) continue;
+                const det = detectedBoxes[ci];
+                const rw = det.x2 - det.x1, rh = det.y2 - det.y1;
+                if (rw < 20 || rh < 20) continue; // too small for reliable embedding
+
+                try {
+                  const embedding = await recognizeFace(imageData, det, width, height);
+                  if (!embedding) continue;
+
+                  let bestSim = 0.45; // cosine similarity threshold
+                  let bestId = -1;
+                  for (const [id, refEmb] of identityEmbeddings) {
+                    if (matchedIds.has(id)) continue;
+                    if (identityKalman.has(id)) continue;
+                    const sim = cosineSimilarity(embedding, refEmb);
+                    if (sim > bestSim) { bestSim = sim; bestId = id; }
+                  }
+                  if (bestId >= 0) {
+                    identityKalman.set(bestId, new KalmanBox(det));
+                    matchedIds.add(bestId);
+                    matchedDets.add(ci);
+                  }
+                } catch { /* embedding extraction failed, skip */ }
               }
             }
           } else {
