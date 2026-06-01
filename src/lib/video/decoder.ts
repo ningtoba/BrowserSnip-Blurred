@@ -246,15 +246,58 @@ export async function* decodeFramesWebCodecs(
   const { getFFmpeg } = await import('@/lib/ffmpeg/core');
   const ffmpeg = await getFFmpeg();
 
-  // Step 1: ffmpeg transcodes any input to H.264 MP4
-  const mp4Data = await transcodeToH264MP4(ffmpeg, videoFile);
+  const inputBuf = new Uint8Array(await videoFile.arrayBuffer());
+  await ffmpeg.writeFile('input.bin', inputBuf);
+
+  // Fast path: try codec copy first (~2s). If input is already H.264, this
+  // avoids the 15s transcode. Falls back to transcode for AV1/HEVC/VP9.
+  let mp4Data: Uint8Array;
+  try {
+    console.debug('[WebCodecs] trying fast remux (codec copy)...');
+    await ffmpeg.exec(
+      ['-i', 'input.bin', '-c:v', 'copy', '-an', '-movflags', '+faststart', 'output.mp4'],
+      60_000
+    );
+    mp4Data = new Uint8Array((await ffmpeg.readFile('output.mp4')) as Uint8Array);
+    await ffmpeg.deleteFile('output.mp4');
+
+    // Verify it's actually H.264 by checking the codec via mp4box
+    const testBuf = mp4Data.buffer.slice(mp4Data.byteOffset, mp4Data.byteOffset + mp4Data.byteLength);
+    const testFile = createFile();
+    let isH264 = false;
+    testFile.onReady = (info: any) => {
+      isH264 = info.videoTracks?.[0]?.codec?.startsWith('avc') ?? false;
+      testFile.flush();
+    };
+    const testMp4Buf = MP4BoxBuffer.fromArrayBuffer(testBuf, 0);
+    (testMp4Buf as any).fileStart = 0;
+    testFile.appendBuffer(testMp4Buf);
+    testFile.flush();
+    await new Promise(r => setTimeout(r, 100));
+
+    if (!isH264) throw new Error('Not H.264');
+    console.debug('[WebCodecs] fast remux OK, H.264 confirmed');
+  } catch {
+    // Slow path: transcode to H.264 (~15s for 30s video)
+    console.debug('[WebCodecs] transcode to H.264...');
+    await ffmpeg.exec(
+      ['-i', 'input.bin', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+       '-an', '-movflags', '+faststart', 'output.mp4'],
+      300_000
+    );
+    mp4Data = new Uint8Array((await ffmpeg.readFile('output.mp4')) as Uint8Array);
+    await ffmpeg.deleteFile('output.mp4');
+  }
+
+  try { await ffmpeg.deleteFile('input.bin'); } catch { /* ignore */ }
+
   console.debug('[WebCodecs] MP4:', mp4Data.length, 'bytes');
   if (mp4Data.length === 0) throw new Error('ffmpeg produced empty MP4');
 
-  // Step 2: mp4box demuxes the MP4 into codec config + encoded samples
+  // mp4box demuxes the MP4 into codec config + encoded samples
   const mp4Buf = mp4Data.buffer.slice(mp4Data.byteOffset, mp4Data.byteOffset + mp4Data.byteLength);
   const { config, chunks } = await demuxMP4(mp4Buf);
 
-  // Step 3: VideoDecoder decodes the samples
+  // VideoDecoder decodes the samples
   yield* decodeAndYield(config, chunks, signal);
 }
