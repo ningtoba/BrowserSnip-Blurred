@@ -24,34 +24,20 @@ function cpuPixelateBlur(
   const h = Math.round(bbox.y2 - bbox.y1);
   if (w <= 0 || h <= 0) return;
 
-  const imageData = ctx.getImageData(x, y, w, h);
-  const data = imageData.data;
-  const smallW = Math.max(1, Math.floor(w / blockSize));
-  const smallH = Math.max(1, Math.floor(h / blockSize));
-  const blurred = new Uint8ClampedArray(w * h * 4);
+  // Use canvas drawImage scaling — no getImageData/putImageData,
+  // so compositing works correctly at edges with no black background.
+  const smallW = Math.max(1, Math.round(w / blockSize));
+  const smallH = Math.max(1, Math.round(h / blockSize));
 
-  for (let by = 0; by < smallH; by++) {
-    for (let bx = 0; bx < smallW; bx++) {
-      let r = 0, g = 0, b = 0, count = 0;
-      const sx = bx * blockSize, sy = by * blockSize;
-      const ex = Math.min(sx + blockSize, w), ey = Math.min(sy + blockSize, h);
-      for (let py = sy; py < ey; py++) {
-        for (let px = sx; px < ex; px++) {
-          const idx = (py * w + px) * 4;
-          r += data[idx]; g += data[idx + 1]; b += data[idx + 2]; count++;
-        }
-      }
-      const ar = Math.round(r / count), ag = Math.round(g / count), ab = Math.round(b / count);
-      for (let py = sy; py < ey; py++) {
-        for (let px = sx; px < ex; px++) {
-          const idx = (py * w + px) * 4;
-          blurred[idx] = ar; blurred[idx + 1] = ag; blurred[idx + 2] = ab; blurred[idx + 3] = data[idx + 3];
-        }
-      }
-    }
-  }
+  // Create a tiny canvas with the averaged colors
+  const tmp = new OffscreenCanvas(smallW, smallH);
+  const tmpCtx = tmp.getContext('2d')!;
+  tmpCtx.drawImage(ctx.canvas as any, x, y, w, h, 0, 0, smallW, smallH);
 
-  ctx.putImageData(new ImageData(blurred, w, h), x, y);
+  // Draw it back scaled up with nearest-neighbor (pixelated)
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(tmp as any, 0, 0, smallW, smallH, x, y, w, h);
+  ctx.imageSmoothingEnabled = true;
 }
 
 function cpuEyebarBlur(

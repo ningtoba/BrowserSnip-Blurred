@@ -393,7 +393,7 @@ const processAndExport = useCallback(async () => {
         [
           '-framerate', fps.toString(),
           '-i', 'frame_%04d.jpg',
-          '-c:v', 'libx264', '-preset', 'fast', '-crf', '26',
+          '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
           '-pix_fmt', 'yuv420p',
           '-threads', Math.min(4, navigator.hardwareConcurrency || 2).toString(),
           '-movflags', '+faststart',
