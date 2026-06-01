@@ -38,84 +38,128 @@ async function extractAnnexBStream(
   return h264Data;
 }
 
-/**
- * Extract the avcC (AVCDecoderConfigurationRecord) from an Annex B H.264
- * bitstream by finding the SPS and PPS NAL units at the start of the stream
- * and packaging them into the avcC binary format that WebCodecs expects.
- */
-function buildAvcCFromAnnexB(stream: Uint8Array): Uint8Array | null {
-  // Find all NAL units before the first non-SPS/PPS NAL
-  const nals: { type: number; data: Uint8Array }[] = [];
-  let i = 0;
-  while (i < stream.length - 3) {
+/** Find the next Annex B start code and return the position of the first byte of the start code. */
+function findStartCode(stream: Uint8Array, from: number): number {
+  for (let i = from; i < stream.length - 3; i++) {
     if (stream[i] === 0 && stream[i + 1] === 0) {
-      let scLen: number;
-      if (stream[i + 2] === 1) scLen = 3;
-      else if (stream[i + 2] === 0 && i + 3 < stream.length && stream[i + 3] === 1) scLen = 4;
-      else { i++; continue; }
-
-      const nalStart = i + scLen;
-      let nalEnd = stream.length;
-      for (let j = nalStart + 1; j < stream.length - 2; j++) {
-        if (stream[j] === 0 && stream[j + 1] === 0 &&
-            (stream[j + 2] === 1 || (stream[j + 2] === 0 && j + 3 < stream.length && stream[j + 3] === 1))) {
-          nalEnd = j;
-          break;
-        }
-      }
-
-      const nalType = stream[nalStart] & 0x1f;
-      if (nalType === 7 || nalType === 8) {
-        nals.push({ type: nalType, data: stream.slice(nalStart, nalEnd) });
-      } else if (nalType === 5 || nalType === 1) {
-        break; // reached IDR or non-IDR slice — stop collecting
-      } else {
-        // Skip other NAL types (AUD, SEI, etc.)
-      }
-      i = nalEnd;
-    } else {
-      i++;
+      if (stream[i + 2] === 1) return i;
+      if (stream[i + 2] === 0 && stream[i + 3] === 1) return i;
     }
+  }
+  return -1;
+}
+
+/**
+ * Split the Annex B stream into access units (chunks), each starting with
+ * a start code. Group SPS+PPS+IDR into a single key chunk.
+ */
+function splitIntoAccessUnits(stream: Uint8Array): { data: Uint8Array; key: boolean }[] {
+  // Step 1: split at every start code boundary
+  const rawUnits: Uint8Array[] = [];
+  let pos = findStartCode(stream, 0);
+  while (pos >= 0) {
+    const nextPos = findStartCode(stream, pos + 3);
+    rawUnits.push(stream.slice(pos, nextPos >= 0 ? nextPos : stream.length));
+    pos = nextPos;
+  }
+
+  // Step 2: group into access units — SPS/PPS accumulate until IDR
+  const START_CODE = new Uint8Array([0, 0, 0, 1]);
+  const chunks: { data: Uint8Array; key: boolean }[] = [];
+  let pendingBufs: Uint8Array[] = [];
+  let pendingSize = 0;
+
+  function flushPending(key: boolean) {
+    if (pendingBufs.length === 0) return;
+    const combined = new Uint8Array(pendingSize);
+    let off = 0;
+    for (const buf of pendingBufs) { combined.set(buf, off); off += buf.length; }
+    chunks.push({ data: combined, key });
+    pendingBufs = [];
+    pendingSize = 0;
+  }
+
+  for (const unit of rawUnits) {
+    // Determine NAL type from byte after start code
+    let nalType = 0;
+    if (unit[2] === 1) nalType = unit[3] & 0x1f;
+    else if (unit[3] === 1) nalType = unit[4] & 0x1f;
+
+    if (nalType === 5) {
+      // IDR: flush any preceding SPS/PPS + this IDR as one key chunk
+      pendingBufs.push(unit);
+      pendingSize += unit.length;
+      flushPending(true);
+    } else if (nalType === 7 || nalType === 8) {
+      // SPS/PPS: accumulate
+      pendingBufs.push(unit);
+      pendingSize += unit.length;
+    } else {
+      // Non-IDR slice: flush leftover, then emit as delta
+      flushPending(false);
+      chunks.push({ data: unit, key: false });
+    }
+  }
+  flushPending(false);
+
+  return chunks;
+}
+
+/**
+ * Extract avcC from the SPS/PPS found at the start of an Annex B stream.
+ * Returns the AVCDecoderConfigurationRecord bytes.
+ */
+function buildAvcCFromAnnexB(stream: Uint8Array): { avcC: Uint8Array; profileIdc: number; levelIdc: number } | null {
+  const nals: { type: number; data: Uint8Array }[] = [];
+  let pos = findStartCode(stream, 0);
+  while (pos >= 0) {
+    const nextPos = findStartCode(stream, pos + 3);
+    const unit = stream.slice(pos, nextPos >= 0 ? nextPos : stream.length);
+
+    // Extract NAL payload (after start code)
+    let nalStart: number;
+    if (unit[2] === 1) nalStart = 3;
+    else if (unit[3] === 1) nalStart = 4;
+    else { pos = nextPos; continue; }
+
+    const nalType = unit[nalStart] & 0x1f;
+    if (nalType === 7 || nalType === 8) {
+      nals.push({ type: nalType, data: unit.slice(nalStart) });
+    } else if (nalType === 5 || nalType === 1) {
+      break; // reached picture data — stop
+    }
+    pos = nextPos >= 0 ? nextPos : -1;
   }
 
   const sps = nals.find(n => n.type === 7);
   const pps = nals.find(n => n.type === 8);
   if (!sps || !pps) return null;
 
-  // Build AVCDecoderConfigurationRecord (ISO 14496-15)
   const spsBytes = sps.data;
   const ppsBytes = pps.data;
-
-  // Parse minimal SPS fields
   const profileIdc = spsBytes[1];
   const constraintFlags = spsBytes[2];
   const levelIdc = spsBytes[3];
 
   const avcC = new Uint8Array(
-    5 +                       // header (configVersion + profile + constraints + level + lengthSizeMinusOne)
-    1 + 2 + spsBytes.length + // numOfSPS + SPS length + SPS data
-    1 + 2 + ppsBytes.length   // numOfPPS + PPS length + PPS data
+    5 + 1 + 2 + spsBytes.length + 1 + 2 + ppsBytes.length
   );
   let off = 0;
-  avcC[off++] = 1;            // configurationVersion
-  avcC[off++] = profileIdc;   // AVCProfileIndication
-  avcC[off++] = constraintFlags; // profile_compatibility
-  avcC[off++] = levelIdc;     // AVCLevelIndication
-  avcC[off++] = 0xFF;         // lengthSizeMinusOne = 3 (4-byte NAL lengths)
-
-  // SPS
-  avcC[off++] = 0xE1;         // numOfSequenceParameterSets = 1
+  avcC[off++] = 1;              // configurationVersion
+  avcC[off++] = profileIdc;
+  avcC[off++] = constraintFlags;
+  avcC[off++] = levelIdc;
+  avcC[off++] = 0xFF;           // lengthSizeMinusOne = 3 (4-byte NAL lengths)
+  avcC[off++] = 0xE1;           // numOfSPS = 1
   avcC[off++] = (spsBytes.length >> 8) & 0xFF;
   avcC[off++] = spsBytes.length & 0xFF;
   avcC.set(spsBytes, off); off += spsBytes.length;
-
-  // PPS
-  avcC[off++] = 1;            // numOfPictureParameterSets = 1
+  avcC[off++] = 1;              // numOfPPS = 1
   avcC[off++] = (ppsBytes.length >> 8) & 0xFF;
   avcC[off++] = ppsBytes.length & 0xFF;
   avcC.set(ppsBytes, off);
 
-  return avcC;
+  return { avcC, profileIdc, levelIdc };
 }
 
 export async function* decodeFramesWebCodecs(
@@ -125,27 +169,43 @@ export async function* decodeFramesWebCodecs(
   const { getFFmpeg } = await import('@/lib/ffmpeg/core');
   const ffmpeg = await getFFmpeg();
 
-  // Use ffmpeg to produce Annex B H.264 bitstream (SPS/PPS inline)
   const annexB = await extractAnnexBStream(ffmpeg, videoFile);
   console.debug('[WebCodecs] Annex B stream:', annexB.length, 'bytes');
-
   if (annexB.length === 0) throw new Error('ffmpeg produced empty H.264 stream');
 
-  // Build avcC description from the SPS/PPS in the Annex B stream
-  const avcC = buildAvcCFromAnnexB(annexB);
-  console.debug('[WebCodecs] avcC:', avcC ? avcC.length + ' bytes' : 'MISSING');
+  // Build avcC + derive codec string from actual SPS profile/level
+  const avcCInfo = buildAvcCFromAnnexB(annexB);
+  console.debug('[WebCodecs] avcC:', avcCInfo ? avcCInfo.avcC.length + ' bytes' : 'MISSING');
+  if (!avcCInfo) throw new Error('No SPS/PPS found in H.264 stream');
 
-  // Feed the entire Annex B stream as a single keyframe chunk.
-  // Chrome's built-in Annex B converter handles all NAL parsing internally.
+  const { avcC, profileIdc, levelIdc } = avcCInfo;
+
+  // Derive codec string from actual SPS profile/level/constraints
+  const codec = `avc1.${profileIdc.toString(16).padStart(2, '0')}${avcC[2].toString(16).padStart(2, '0')}${levelIdc.toString(16).padStart(2, '0')}`;
+  console.debug('[WebCodecs] codec:', codec);
+
+  // Split into access units with SPS+PPS+IDR grouping
+  const chunks = splitIntoAccessUnits(annexB);
+  console.debug('[WebCodecs] access units:', chunks.length,
+    'keyframes:', chunks.filter(c => c.key).length);
+  if (chunks.length === 0) throw new Error('No access units in H.264 stream');
+
+  // First chunk MUST be a keyframe
+  if (!chunks[0].key) {
+    console.error('[WebCodecs] first chunk is NOT a keyframe! NAL types in first 200 bytes:',
+      Array.from(annexB.slice(0, 200)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+    throw new Error('First access unit is not a keyframe');
+  }
+
   const config: VideoDecoderConfig = {
-    codec: 'avc1.640028', // High@L4.0 — common for 1080p H.264
+    codec,
     codedWidth: 1920,
     codedHeight: 1080,
-    ...(avcC ? { description: avcC.buffer.slice(avcC.byteOffset, avcC.byteOffset + avcC.byteLength) } : {}),
+    description: avcC.buffer.slice(avcC.byteOffset, avcC.byteOffset + avcC.byteLength),
   };
 
   const support = await VideoDecoder.isConfigSupported(config);
-  console.debug('[WebCodecs] config supported:', support.supported, 'config:', support.config);
+  console.debug('[WebCodecs] config supported:', support.supported);
   if (!support.supported) throw new Error('VideoDecoder config not supported');
 
   const frameQueue: VideoFrame[] = [];
@@ -158,13 +218,24 @@ export async function* decodeFramesWebCodecs(
 
   decoder.configure(config);
 
-  // Single keyframe chunk containing the entire Annex B bitstream
-  decoder.decode(new EncodedVideoChunk({
-    type: 'key',
-    timestamp: 0,
-    duration: 33_333,
-    data: annexB,
-  }));
+  // Feed access units one at a time
+  const frameIntervalUs = 33_333;
+  let timestamp = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    if (signal.aborted) break;
+    decoder.decode(new EncodedVideoChunk({
+      type: chunks[i].key ? 'key' : 'delta',
+      timestamp,
+      duration: frameIntervalUs,
+      data: chunks[i].data,
+    }));
+    timestamp += frameIntervalUs;
+    // Yield to event loop periodically
+    if (i % 30 === 0) {
+      await new Promise(r => setTimeout(r, 0));
+      if (decodeError) throw decodeError;
+    }
+  }
 
   if (decodeError) throw decodeError;
 
