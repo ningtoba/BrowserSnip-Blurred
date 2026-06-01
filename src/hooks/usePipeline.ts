@@ -318,29 +318,19 @@ const processAndExport = useCallback(async () => {
           if (shouldDetect) {
             const detectedBoxes = await detectFaces(imageData, width, height);
 
-            // Predict where each tracked identity should be based on velocity
-            const predictedBoxes = new Map<number, DetectionBox>();
-            for (const [id, box] of identityBoxes) {
-              const vel = identityVelocity.get(id);
-              if (vel) {
-                predictedBoxes.set(id, {
-                  x1: box.x1 + vel.dx1,
-                  y1: box.y1 + vel.dy1,
-                  x2: box.x2 + vel.dx2,
-                  y2: box.y2 + vel.dy2,
-                  confidence: box.confidence,
-                });
-              } else {
-                predictedBoxes.set(id, box);
-              }
-            }
-
-            // Match detections to PREDICTED positions (not raw smoothed positions)
+            // ── Step 1: Match detections to tracked identities via predicted positions ──
             const pairs: { detIdx: number; id: number; iou: number }[] = [];
             for (let ci = 0; ci < detectedBoxes.length; ci++) {
-              for (const [id, predBox] of predictedBoxes) {
+              for (const [id, box] of identityBoxes) {
+                const vel = identityVelocity.get(id);
+                // Predict where the identity should be now
+                const predBox: DetectionBox = vel ? {
+                  x1: box.x1 + vel.dx1, y1: box.y1 + vel.dy1,
+                  x2: box.x2 + vel.dx2, y2: box.y2 + vel.dy2,
+                  confidence: box.confidence,
+                } : box;
                 const iou = computeIOU(detectedBoxes[ci], predBox);
-                if (iou > 0.15) pairs.push({ detIdx: ci, id, iou });
+                if (iou > 0.1) pairs.push({ detIdx: ci, id, iou });
               }
             }
             pairs.sort((a, b) => b.iou - a.iou);
@@ -348,53 +338,56 @@ const processAndExport = useCallback(async () => {
             const matchedDets = new Set<number>();
             const matchedIds = new Set<number>();
             for (const p of pairs) {
-              if (!matchedDets.has(p.detIdx) && !matchedIds.has(p.id)) {
-                const prevBox = identityBoxes.get(p.id)!;
-                const det = detectedBoxes[p.detIdx];
+              if (matchedDets.has(p.detIdx) || matchedIds.has(p.id)) continue;
 
-                // Update velocity (EMA of frame-to-frame displacement)
-                const prevVel = identityVelocity.get(p.id);
-                const rawDx1 = det.x1 - prevBox.x1;
-                const rawDy1 = det.y1 - prevBox.y1;
-                const rawDx2 = det.x2 - prevBox.x2;
-                const rawDy2 = det.y2 - prevBox.y2;
-                const velAlpha = 0.5;
-                identityVelocity.set(p.id, {
-                  dx1: prevVel ? prevVel.dx1 * (1 - velAlpha) + rawDx1 * velAlpha : rawDx1,
-                  dy1: prevVel ? prevVel.dy1 * (1 - velAlpha) + rawDy1 * velAlpha : rawDy1,
-                  dx2: prevVel ? prevVel.dx2 * (1 - velAlpha) + rawDx2 * velAlpha : rawDx2,
-                  dy2: prevVel ? prevVel.dy2 * (1 - velAlpha) + rawDy2 * velAlpha : rawDy2,
-                });
+              const prevBox = identityBoxes.get(p.id)!;
+              const det = detectedBoxes[p.detIdx];
 
-                // EMA smoothing: blend previous smoothed position with actual detection.
-                // Velocity is used ONLY for matching, NOT for the smoothed position.
-                identityBoxes.set(p.id, {
-                  x1: prevBox.x1 * (1 - EMA_ALPHA) + det.x1 * EMA_ALPHA,
-                  y1: prevBox.y1 * (1 - EMA_ALPHA) + det.y1 * EMA_ALPHA,
-                  x2: prevBox.x2 * (1 - EMA_ALPHA) + det.x2 * EMA_ALPHA,
-                  y2: prevBox.y2 * (1 - EMA_ALPHA) + det.y2 * EMA_ALPHA,
-                  confidence: det.confidence,
-                });
-                matchedDets.add(p.detIdx);
-                matchedIds.add(p.id);
-              }
+              // Update velocity
+              const prevVel = identityVelocity.get(p.id);
+              const vx = det.x1 - prevBox.x1, vy = det.y1 - prevBox.y1;
+              const vx2 = det.x2 - prevBox.x2, vy2 = det.y2 - prevBox.y2;
+              identityVelocity.set(p.id, {
+                dx1: prevVel ? prevVel.dx1 * 0.5 + vx * 0.5 : vx,
+                dy1: prevVel ? prevVel.dy1 * 0.5 + vy * 0.5 : vy,
+                dx2: prevVel ? prevVel.dx2 * 0.5 + vx2 * 0.5 : vx2,
+                dy2: prevVel ? prevVel.dy2 * 0.5 + vy2 * 0.5 : vy2,
+              });
+
+              // EMA smoothing: blend previous with actual detection
+              identityBoxes.set(p.id, {
+                x1: prevBox.x1 * (1 - EMA_ALPHA) + det.x1 * EMA_ALPHA,
+                y1: prevBox.y1 * (1 - EMA_ALPHA) + det.y1 * EMA_ALPHA,
+                x2: prevBox.x2 * (1 - EMA_ALPHA) + det.x2 * EMA_ALPHA,
+                y2: prevBox.y2 * (1 - EMA_ALPHA) + det.y2 * EMA_ALPHA,
+                confidence: det.confidence,
+              });
+              matchedDets.add(p.detIdx);
+              matchedIds.add(p.id);
             }
 
-            // Unmatched detections: try scan-phase identity matching
+            // ── Step 2: Unmatched detections → scan-phase identity matching ──
+            // Try to link unknown detections to scan-phase identities
             for (let ci = 0; ci < detectedBoxes.length; ci++) {
               if (matchedDets.has(ci)) continue;
               let bestIOU = 0.25;
               let bestId = -1;
               for (const det of scanDetections) {
-                if (det.clusterId === undefined || matchedIds.has(det.clusterId)) continue;
+                if (det.clusterId === undefined) continue;
+                if (matchedIds.has(det.clusterId)) continue;
+                if (identityBoxes.has(det.clusterId)) continue; // already tracked
                 const iou = computeIOU(detectedBoxes[ci], det);
                 if (iou > bestIOU) { bestIOU = iou; bestId = det.clusterId!; }
               }
-              if (bestId >= 0 && selectedIds.has(bestId)) {
+              if (bestId >= 0) {
                 identityBoxes.set(bestId, detectedBoxes[ci]);
+                identityVelocity.set(bestId, { dx1: 0, dy1: 0, dx2: 0, dy2: 0 });
                 matchedIds.add(bestId);
+                matchedDets.add(ci);
               }
             }
+
+            // Unmatched identities keep their position + velocity (persistence)
           }
           // On non-detection frames: identityBoxes keeps smoothed positions
 
