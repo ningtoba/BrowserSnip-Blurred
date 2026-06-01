@@ -3,7 +3,7 @@ import type { DetectionBox } from '@/types';
 
 const SCRFD_INPUT_SIZE = 640;
 const STRIDES = [8, 16, 32];
-const SCORE_THRESH = 0.5;
+const SCORE_THRESH = 0.7;
 const NMS_THRESH = 0.4;
 
 function sigmoid(x: number): number {
@@ -76,9 +76,6 @@ export async function detectFacesSCRFD(
   feeds[session.inputNames[0]] = tensor;
   const results = await session.run(feeds);
 
-  const outputNames = Object.keys(results);
-  console.debug('[SCRFD] outputs:', outputNames);
-
   const allDets: { x1: number; y1: number; x2: number; y2: number; score: number }[] = [];
 
   for (let li = 0; li < STRIDES.length; li++) {
@@ -98,15 +95,9 @@ export async function detectFacesSCRFD(
     const bboxData = (await bboxTensor.getData()) as Float32Array;
     const totalAnchors = scoreData.length;
 
-    console.debug(`[SCRFD] stride ${stride}: ${totalAnchors} anchors, ${numPositions} positions`);
-
     // Flat indexing: iterate all anchors, derive position from index
     for (let idx = 0; idx < totalAnchors; idx++) {
-      const rawScore = scoreData[idx];
-      // Log first few scores to check if they're logits or probabilities
-      if (li === 0 && idx < 5) console.debug(`[SCRFD] raw score[${idx}]:`, rawScore);
-
-      const score = rawScore; // try without sigmoid first
+      const score = scoreData[idx]; // model outputs probabilities directly
       if (score < SCORE_THRESH) continue;
 
       // Derive grid position from flat index
@@ -139,14 +130,7 @@ export async function detectFacesSCRFD(
     if (results[`kps_${stride}`]) results[`kps_${stride}`].dispose();
   }
 
-  console.debug('[SCRFD] pre-NMS:', allDets.length);
-  if (allDets.length > 0) {
-    const s = allDets[0];
-    console.debug('[SCRFD] sample:', s.x1.toFixed(0), s.y1.toFixed(0), s.x2.toFixed(0), s.y2.toFixed(0), s.score.toFixed(3));
-  }
-
   const kept = nms(allDets, NMS_THRESH);
-  console.debug('[SCRFD] post-NMS:', kept.length);
 
   return kept
     .filter((d) => {
