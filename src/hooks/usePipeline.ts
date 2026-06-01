@@ -264,7 +264,7 @@ const processAndExport = useCallback(async () => {
       let globalFrameCount = 0;
       // Per-identity tracking with EMA smoothing to eliminate jitter.
       const identityBoxes = new Map<number, DetectionBox>(); // smoothed output
-      const EMA_ALPHA = 0.7; // 0 = ignore new detection, 1 = no smoothing
+      const EMA_ALPHA = 0.4; // smooth but responsive (detection runs every frame)
       const jpgCanvas = new OffscreenCanvas(width, height);
       const jpgCtx = jpgCanvas.getContext('2d', { willReadFrequently: true })!;
 

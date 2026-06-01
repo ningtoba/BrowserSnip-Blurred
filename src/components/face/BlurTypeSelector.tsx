@@ -21,25 +21,38 @@ export function BlurTypeSelector() {
 
   const hasPerIdentity = identityBlurTypes.size > 0;
 
+  const handleSetBlurType = (type: BlurType) => {
+    setBlurType(type);
+    // Clear per-identity overrides when global blur type is changed
+    if (hasPerIdentity) {
+      useProcessStore.setState({ identityBlurTypes: new Map() });
+    }
+  };
+
   return (
-    <div className={`doodle-section space-y-3 ${hasPerIdentity ? 'opacity-40 pointer-events-none' : ''}`}>
-      <h4 className="text-xs font-semibold text-ink">
-        Blur Type
+    <div className="doodle-section space-y-3">
+      <div className="flex items-center justify-between">
+        <h4 className="text-xs font-semibold text-ink">Blur Type</h4>
         {hasPerIdentity && (
-          <span className="ml-2 text-[10px] font-normal text-ink-muted">
-            (per-face overrides active)
-          </span>
+          <button
+            onClick={() => useProcessStore.setState({ identityBlurTypes: new Map() })}
+            className="text-[10px] text-accent hover:text-accent-hover transition-colors"
+          >
+            Reset to global
+          </button>
         )}
-      </h4>
+      </div>
       <div className="flex gap-2">
         {BLUR_OPTIONS.map((option) => (
           <button
             key={option.type}
-            onClick={() => setBlurType(option.type)}
+            onClick={() => handleSetBlurType(option.type)}
             className={`doodle-chip ${
-              blurConfig.type === option.type
+              blurConfig.type === option.type && !hasPerIdentity
                 ? 'doodle-chip-active'
-                : 'doodle-chip-inactive'
+                : hasPerIdentity
+                  ? 'doodle-chip-inactive opacity-50'
+                  : 'doodle-chip-inactive'
             }`}
           >
             <div className="text-left space-y-0.5">
@@ -49,6 +62,11 @@ export function BlurTypeSelector() {
           </button>
         ))}
       </div>
+      {hasPerIdentity && (
+        <p className="text-[10px] text-ink-muted">
+          Per-face blur types are active. Click a blur type above to apply it globally.
+        </p>
+      )}
     </div>
   );
 }
