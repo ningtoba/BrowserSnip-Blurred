@@ -3,7 +3,9 @@ import type { DetectionBox } from '@/types';
 
 const SCRFD_INPUT_SIZE = 640;
 const STRIDES = [8, 16, 32];
-const NUM_ANCHORS = 2; // SCRFD uses 2 anchors per position
+const NUM_ANCHORS = 2;
+const SCORE_THRESH = 0.5;
+const NMS_THRESH = 0.4;
 
 function sigmoid(x: number): number {
   return 1 / (1 + Math.exp(-x));
@@ -81,46 +83,50 @@ export async function detectFacesSCRFD(
     const stride = STRIDES[li];
     const featH = Math.floor(modelH / stride);
     const featW = Math.floor(modelW / stride);
-    const numAnchors = featH * featW * NUM_ANCHORS;
+    const numPositions = featH * featW;
 
     const scoreData = (await results[`score_${stride}`].getData()) as Float32Array;
     const bboxData = (await results[`bbox_${stride}`].getData()) as Float32Array;
-    // kpsData available but not needed for detection-only use
 
-    for (let i = 0; i < numAnchors; i++) {
-      const score = sigmoid(scoreData[i]);
-      if (score < 0.3) continue; // use 0.3 threshold during decode
+    // SCRFD anchor layout: all anchor-0 positions, then all anchor-1 positions
+    // Each anchor center = (col * stride, row * stride) in model space
+    for (let a = 0; a < NUM_ANCHORS; a++) {
+      const anchorOffset = a * numPositions;
+      for (let pos = 0; pos < numPositions; pos++) {
+        const idx = anchorOffset + pos;
+        const score = sigmoid(scoreData[idx]);
+        if (score < SCORE_THRESH) continue;
 
-      // Anchor grid position
-      const anchorIdx = Math.floor(i / NUM_ANCHORS);
-      const col = anchorIdx % featW;
-      const row = Math.floor(anchorIdx / featW);
-      const anchorIdxInPair = i % NUM_ANCHORS;
+        const col = pos % featW;
+        const row = Math.floor(pos / featW);
+        const cx = col * stride;
+        const cy = row * stride;
 
-      // Decode bbox
-      const cx = (col + bboxData[i * 4]) * stride;
-      const cy = (row + bboxData[i * 4 + 1]) * stride;
-      const w = Math.exp(bboxData[i * 4 + 2]) * stride;
-      const h = Math.exp(bboxData[i * 4 + 3]) * stride;
+        // SCRFD bbox: distances from anchor center to [left, top, right, bottom]
+        // NOT SSD-style (cx, cy, w, h with exp). These are direct pixel distances.
+        const dl = bboxData[idx * 4] * stride;
+        const dt = bboxData[idx * 4 + 1] * stride;
+        const dr = bboxData[idx * 4 + 2] * stride;
+        const db = bboxData[idx * 4 + 3] * stride;
 
-      const x1 = Math.max(0, (cx - w / 2) * scaleX);
-      const y1 = Math.max(0, (cy - h / 2) * scaleY);
-      const x2 = Math.min(origWidth, (cx + w / 2) * scaleX);
-      const y2 = Math.min(origHeight, (cy + h / 2) * scaleY);
+        const x1 = Math.max(0, (cx - dl) * scaleX);
+        const y1 = Math.max(0, (cy - dt) * scaleY);
+        const x2 = Math.min(origWidth, (cx + dr) * scaleX);
+        const y2 = Math.min(origHeight, (cy + db) * scaleY);
 
-      if (x2 > x1 && y2 > y1) {
-        allDets.push({ x1, y1, x2, y2, score });
+        if (x2 > x1 && y2 > y1) {
+          allDets.push({ x1, y1, x2, y2, score });
+        }
       }
     }
 
-    // Dispose tensors
     results[`score_${stride}`].dispose();
     results[`bbox_${stride}`].dispose();
     if (results[`kps_${stride}`]) results[`kps_${stride}`].dispose();
   }
 
   // NMS
-  const kept = nms(allDets, 0.4);
+  const kept = nms(allDets, NMS_THRESH);
 
   // Filter: aspect ratio (faces are roughly square) and minimum size
   return kept
