@@ -112,6 +112,42 @@ async function transcodeToH264MP4(
 }
 
 /**
+ * Serialize mp4box's parsed avcC box into the AVCDecoderConfigurationRecord
+ * binary format that WebCodecs expects. mp4box already parsed the media —
+ * this just repackages its parsed fields into the binary record.
+ */
+function serializeAvcC(avcCBox: any): Uint8Array {
+  const sps = avcCBox.SPS as { length: number; data: Uint8Array }[];
+  const pps = avcCBox.PPS as { length: number; data: Uint8Array }[];
+
+  let size = 5 + 1; // header + numOfSPS
+  for (const s of sps) size += 2 + s.length;
+  size += 1; // numOfPPS
+  for (const p of pps) size += 2 + p.length;
+
+  const buf = new Uint8Array(size);
+  let off = 0;
+  buf[off++] = avcCBox.configurationVersion;
+  buf[off++] = avcCBox.AVCProfileIndication;
+  buf[off++] = avcCBox.profile_compatibility;
+  buf[off++] = avcCBox.AVCLevelIndication;
+  buf[off++] = 0xFC | (avcCBox.lengthSizeMinusOne & 0x03);
+  buf[off++] = sps.length & 0x1F;
+  for (const s of sps) {
+    buf[off++] = (s.length >> 8) & 0xFF;
+    buf[off++] = s.length & 0xFF;
+    buf.set(s.data, off); off += s.length;
+  }
+  buf[off++] = pps.length;
+  for (const p of pps) {
+    buf[off++] = (p.length >> 8) & 0xFF;
+    buf[off++] = p.length & 0xFF;
+    buf.set(p.data, off); off += p.length;
+  }
+  return buf;
+}
+
+/**
  * Demux an MP4 buffer using mp4box.js — the right tool for MP4 demuxing.
  * Returns the VideoDecoderConfig (with avcC description) and encoded samples.
  */
@@ -125,28 +161,33 @@ function demuxMP4(mp4Buf: ArrayBuffer): Promise<{
     let config: VideoDecoderConfig | null = null;
     let ready = false;
 
-    file.onReady = (info: any) => {
-      const track = info.videoTracks?.[0];
-      if (!track) { reject(new Error('No video track')); return; }
+    file.onReady = (_info: any) => {
+      // Access the internal trak structure — mp4box's getInfo() doesn't
+      // include the description field, but the parsed boxes are still there
+      const trak = (file as any).moov?.traks?.[0];
+      const sampleEntry = trak?.mdia?.minf?.stbl?.stsd?.entries?.[0];
+      const avcCBox = sampleEntry?.avcC;
 
-      config = {
-        codec: track.codec,
-        codedWidth: track.track_width,
-        codedHeight: track.track_height,
-      };
+      if (!sampleEntry) { reject(new Error('No sample entry in MP4')); return; }
 
-      // Get avcC description — mp4box provides it via track.description
-      const desc = (track as any).description as Uint8Array | undefined;
-      if (desc && desc.length > 0) {
-        const descBuf = new ArrayBuffer(desc.length);
-        new Uint8Array(descBuf).set(desc);
+      const codec = sampleEntry.getCodec();
+      const width = sampleEntry.getWidth?.() ?? 0;
+      const height = sampleEntry.getHeight?.() ?? 0;
+
+      config = { codec, codedWidth: width, codedHeight: height };
+
+      if (avcCBox) {
+        const avcCBytes = serializeAvcC(avcCBox);
+        const descBuf = new ArrayBuffer(avcCBytes.length);
+        new Uint8Array(descBuf).set(avcCBytes);
         (config as any).description = descBuf;
-        console.debug('[mp4box] description:', descBuf.byteLength, 'bytes');
+        console.debug('[mp4box] avcC:', descBuf.byteLength, 'bytes, codec:', codec);
       } else {
-        console.warn('[mp4box] no description from track — decoder may fail');
+        console.warn('[mp4box] no avcC box found — decoder will fail');
       }
 
-      file.setExtractionOptions(track.id, 'video');
+      const trackId = trak.tkhd.track_id;
+      file.setExtractionOptions(trackId, 'video');
       file.start();
       ready = true;
     };
