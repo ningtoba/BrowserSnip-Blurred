@@ -11,7 +11,7 @@ import { decodeFramesWebCodecs } from '@/lib/video/decoder';
 import { clusterFaces } from '@/lib/engine/clustering';
 // reconstructVideoRaw inlined for batch processing
 import { detectFaces } from '@/lib/engine/detection';
-import { recognizeFace } from '@/lib/engine/recognition';
+import { recognizeFacesBatch, recognizeFace } from '@/lib/engine/recognition';
 import { cosineSimilarity } from '@/lib/utils/math';
 import { applyPixelateBlur, applyEyeBarBlur, applyBlackBoxBlur } from '@/lib/engine/blur';
 import { KalmanBox } from '@/lib/engine/kalman';
@@ -109,19 +109,23 @@ export function usePipeline() {
           return rw >= 10 && rh >= 10;
         });
 
+        // Batched face recognition: preprocess all faces, run one MFN inference
+        updateProgress({
+          phaseDescription: `Analyzing ${validDetections.length} faces (batched)...`,
+          phasePercent: 10,
+          overallPercent: computeOverallPercent('recognizing-faces', 10),
+        });
+
+        const batchInputs = validDetections.map((det) => ({
+          frameData: sampleFrames[det.frameIndex],
+          bbox: det,
+          frameW: meta.width,
+          frameH: meta.height,
+        }));
+
+        const embeddings = await recognizeFacesBatch(batchInputs);
         for (let i = 0; i < validDetections.length; i++) {
-          if (signal.aborted) return;
-          const det = validDetections[i];
-          const frameData = sampleFrames[det.frameIndex];
-          det.embedding = await recognizeFace(frameData, det, meta.width, meta.height) ?? undefined;
-          if (i % 10 === 0 || i === validDetections.length - 1) {
-            updateProgress({
-              phaseDescription: `Analyzing faces... (${i + 1}/${validDetections.length})`,
-              phasePercent: Math.round(((i + 1) / validDetections.length) * 100),
-              overallPercent: computeOverallPercent('recognizing-faces', Math.round(((i + 1) / validDetections.length) * 100)),
-              detail: `Face ${i + 1}/${validDetections.length}`,
-            });
-          }
+          validDetections[i].embedding = embeddings[i] ?? undefined;
         }
         if (signal.aborted) return;
 
