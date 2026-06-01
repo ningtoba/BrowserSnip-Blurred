@@ -13,6 +13,7 @@ import { OutputActions } from '@/components/ui/OutputActions';
 import { MemoryWarning } from '@/components/ui/MemoryWarning';
 import { LogMonitor } from '@/components/ui/LogMonitor';
 import { useONNX } from '@/hooks/useONNX';
+import { terminateFFmpeg } from '@/lib/ffmpeg/core';
 
 export default function App() {
   const file = useFileStore((s) => s.file);
@@ -23,6 +24,18 @@ export default function App() {
   const showLogMonitor = useUIStore((s) => s.showLogMonitor);
   const toggleLogMonitor = useUIStore((s) => s.toggleLogMonitor);
   const { gpuAccelerated, modelsReady, loadingMessage, loadingPercent } = useONNX();
+
+  const handleReset = async () => {
+    if (isProcessing) return;
+    // Revoke any output URLs to free memory
+    const outputUrl = useProcessStore.getState().outputUrl;
+    if (outputUrl) URL.revokeObjectURL(outputUrl);
+    // Terminate ffmpeg to free WASM memory
+    try { await terminateFFmpeg(); } catch { /* ignore */ }
+    // Reset all stores
+    useProcessStore.getState().reset();
+    useFileStore.getState().reset();
+  };
 
   if (!modelsReady) {
     return (
@@ -43,8 +56,19 @@ export default function App() {
     <div className="flex flex-col h-screen-safe">
       <header className="h-[44px] shrink-0 flex items-center justify-between px-4 border-b border-cream-border bg-glass z-20">
         <div className="flex items-center gap-3">
+          <a
+            href="https://www.browsersnip.com"
+            className="flex items-center gap-1.5 text-xs text-ink-muted hover:text-ink-soft transition-colors"
+            title="Back to BrowserSnip"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+            <span className="hidden sm:inline">BrowserSnip</span>
+          </a>
+          <span className="text-cream-border">|</span>
           <span className="text-sm font-semibold tracking-wide text-ink">
-            BrowserSnip Face Blur
+            Face Blur
           </span>
           {phase !== 'idle' && phase !== 'done' && (
             <span className="text-[11px] text-ink-muted hidden sm:inline">
@@ -52,12 +76,23 @@ export default function App() {
             </span>
           )}
         </div>
-        <button
-          onClick={toggleLogMonitor}
-          className="text-xs text-ink-muted hover:text-ink-soft transition-colors"
-        >
-          {showLogMonitor ? 'Hide Logs' : 'Logs'}
-        </button>
+        <div className="flex items-center gap-3">
+          {file && !isProcessing && (
+            <button
+              onClick={handleReset}
+              className="text-xs text-ink-muted hover:text-accent transition-colors"
+              title="Start over with a new video"
+            >
+              New Video
+            </button>
+          )}
+          <button
+            onClick={toggleLogMonitor}
+            className="text-xs text-ink-muted hover:text-ink-soft transition-colors"
+          >
+            {showLogMonitor ? 'Hide Logs' : 'Logs'}
+          </button>
+        </div>
       </header>
 
       <main className="flex-1 overflow-y-auto">

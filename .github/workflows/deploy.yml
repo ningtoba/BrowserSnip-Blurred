@@ -24,6 +24,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - name: Create CNAME file
+        run: echo "blur.browsersnip.com" > dist/CNAME
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
