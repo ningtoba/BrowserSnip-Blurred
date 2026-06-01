@@ -15,54 +15,75 @@ async function* decodeAndYield(
   if (!support.supported) throw new Error('VideoDecoder config not supported');
 
   let frameIndex = 0;
-  const frameQueue: VideoFrame[] = [];
   let decodeError: Error | null = null;
+  let resolveWaiter: (() => void) | null = null;
 
-  const decoder = new VideoDecoder({
-    output(frame: VideoFrame) { frameQueue.push(frame); },
-    error(err: Error) { decodeError = err; },
-  });
-
-  decoder.configure(config);
-
-  const frameIntervalUs = 33_333;
-  let timestamp = 0;
-
-  for (let i = 0; i < chunks.length; i++) {
-    if (signal.aborted) break;
-    try {
-      decoder.decode(new EncodedVideoChunk({
-        type: chunks[i].key ? 'key' : 'delta',
-        timestamp, duration: frameIntervalUs,
-        data: chunks[i].data,
-      }));
-    } catch {
-      await new Promise(r => setTimeout(r, 10));
-      decoder.decode(new EncodedVideoChunk({
-        type: chunks[i].key ? 'key' : 'delta',
-        timestamp, duration: frameIntervalUs,
-        data: chunks[i].data,
-      }));
-    }
-    timestamp += frameIntervalUs;
-    if (i % 30 === 0) {
-      await new Promise(r => setTimeout(r, 0));
-      if (decodeError) throw decodeError;
-    }
+  const readyFrames: VideoFrame[] = [];
+  function onFrame(frame: VideoFrame) {
+    readyFrames.push(frame);
+    resolveWaiter?.();
   }
 
-  if (decodeError) throw decodeError;
-
-  const flushOk = await Promise.race([
-    decoder.flush().then(() => true),
-    new Promise<boolean>(r => setTimeout(() => r(false), 30000)),
-  ]);
-  if (!flushOk) { decoder.close(); throw new Error('Decoder flush timed out'); }
+  const decoder = new VideoDecoder({
+    output: onFrame,
+    error(err: Error) { decodeError = err; resolveWaiter?.(); },
+  });
+  decoder.configure(config);
 
   const canvas = new OffscreenCanvas(1, 1);
   let ctx: OffscreenCanvasRenderingContext2D | null = null;
+  const frameIntervalUs = 33_333;
+  let timestamp = 0;
 
-  for (const frame of frameQueue) {
+  // Process in batches: decode N chunks, yield all resulting frames, repeat.
+  // This keeps memory bounded (~N frames in flight at a time).
+  const BATCH = 60;
+
+  for (let batchStart = 0; batchStart < chunks.length; batchStart += BATCH) {
+    if (signal.aborted) break;
+    const batchEnd = Math.min(batchStart + BATCH, chunks.length);
+
+    // Feed this batch of chunks to the decoder
+    for (let i = batchStart; i < batchEnd; i++) {
+      decoder.decode(new EncodedVideoChunk({
+        type: chunks[i].key ? 'key' : 'delta',
+        timestamp, duration: frameIntervalUs,
+        data: chunks[i].data,
+      }));
+      timestamp += frameIntervalUs;
+    }
+
+    // Wait for at least one frame (or error)
+    if (readyFrames.length === 0) {
+      await new Promise<void>(r => { resolveWaiter = r; });
+      resolveWaiter = null;
+    }
+    if (decodeError) break;
+
+    // Small delay to let more frames arrive
+    await new Promise(r => setTimeout(r, 20));
+
+    // Yield all frames that have been produced so far
+    while (readyFrames.length > 0) {
+      const frame = readyFrames.shift()!;
+      if (signal.aborted) { frame.close(); continue; }
+      const w = frame.displayWidth, h = frame.displayHeight;
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w; canvas.height = h;
+        ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+      }
+      if (!ctx) ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+      ctx.drawImage(frame, 0, 0);
+      yield { imageData: ctx.getImageData(0, 0, w, h), timestamp: frameIndex / 30, index: frameIndex };
+      frameIndex++;
+      frame.close(); // free VideoFrame memory immediately
+    }
+  }
+
+  // Flush remaining frames
+  await decoder.flush();
+  while (readyFrames.length > 0) {
+    const frame = readyFrames.shift()!;
     if (signal.aborted) { frame.close(); continue; }
     const w = frame.displayWidth, h = frame.displayHeight;
     if (canvas.width !== w || canvas.height !== h) {
