@@ -10,14 +10,14 @@ export const YUNET_NMS_THRESHOLD = 0.35;
 export const YUNET_TOP_K = 5000;
 export const PIXELATE_BLOCK_SIZE = 15;
 export const BATCH_SIZE = 300;
-export const DETECT_EVERY_N_FRAMES = 2;
+export const DETECT_EVERY_N_FRAMES = 2; // detect every 2nd frame, Kalman tracks in between
 export const MAX_DETECTIONS_PER_FRAME = 20;
 
 export const MODELS: ONNXModelConfig[] = [
   {
-    name: 'scrfd',
-    url: '/models/scrfd_2.5g_bnkps.onnx',
-    sizeMB: 3.3,
+    name: 'yunet',
+    url: '/models/face_detection_yunet_2023mar.onnx',
+    sizeMB: 0.23,
     inputShape: [1, 3, 640, 640],
   },
   {
