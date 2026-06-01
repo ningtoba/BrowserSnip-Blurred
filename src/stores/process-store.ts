@@ -30,7 +30,9 @@ interface ProcessState {
   ) => void;
   setIdentityThumbnails: (thumbnails: Map<number, string>) => void;
   toggleIdentity: (id: number) => void;
+  identityBlurTypes: Map<number, BlurType>;
   setBlurType: (type: BlurType) => void;
+  setIdentityBlurType: (id: number, type: BlurType) => void;
   startProcessing: () => void;
   setOutput: (blob: Blob, url: string) => void;
   setError: (error: string) => void;
@@ -51,6 +53,7 @@ export const useProcessStore = create<ProcessState>((set, get) => ({
   identityThumbnails: new Map(),
   selectedIdentities: new Set(),
   blurConfig: { type: 'pixelate', pixelSize: 15, selectedIdentities: [] },
+  identityBlurTypes: new Map(),
   isProcessing: false,
   outputBlob: null,
   outputUrl: null,
@@ -90,6 +93,13 @@ export const useProcessStore = create<ProcessState>((set, get) => ({
 
   setBlurType: (type) =>
     set((s) => ({ blurConfig: { ...s.blurConfig, type } })),
+
+  setIdentityBlurType: (id, type) =>
+    set((s) => {
+      const next = new Map(s.identityBlurTypes);
+      next.set(id, type);
+      return { identityBlurTypes: next };
+    }),
 
   startProcessing: () =>
     set({
@@ -140,6 +150,7 @@ export const useProcessStore = create<ProcessState>((set, get) => ({
       identities: [],
       identityThumbnails: new Map(),
       selectedIdentities: new Set(),
+      identityBlurTypes: new Map(),
       isProcessing: false,
       outputBlob: null,
       outputUrl: null,

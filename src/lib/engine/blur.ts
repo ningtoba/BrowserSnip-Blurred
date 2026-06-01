@@ -45,11 +45,11 @@ function cpuEyebarBlur(
   bbox: DetectionBox
 ): void {
   const fw = bbox.x2 - bbox.x1, fh = bbox.y2 - bbox.y1;
-  const barY = bbox.y1 + fh * 0.28;
-  const barH = Math.max(6, fh * 0.12);
-  const barW = fw * 0.85;
-  const barX = bbox.x1 + fw * 0.075;
-  const radius = Math.min(3, barH / 2);
+  const barY = bbox.y1 + fh * 0.22;
+  const barH = Math.max(10, fh * 0.2);
+  const barW = fw * 0.9;
+  const barX = bbox.x1 + fw * 0.05;
+  const radius = Math.min(4, barH / 2);
 
   ctx.fillStyle = '#000000';
   ctx.beginPath();

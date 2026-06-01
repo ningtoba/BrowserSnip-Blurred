@@ -208,7 +208,9 @@ function cpuBlurFrame(
   imageData: ImageData,
   boxes: DetectionBox[],
   targetIndices: Set<number>,
-  blurType: 'pixelate' | 'eye-bar'
+  blurTypeMap: Map<number, 'pixelate' | 'eye-bar'>,
+  indexToId: Map<number, number>,
+  fallbackType: 'pixelate' | 'eye-bar'
 ): ImageData {
   const canvas = new OffscreenCanvas(imageData.width, imageData.height);
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
@@ -216,7 +218,6 @@ function cpuBlurFrame(
 
   for (const idx of targetIndices) {
     const bbox = boxes[idx];
-    // Clamp bbox to image boundaries to prevent black out-of-bounds pixels
     const clamped: DetectionBox = {
       x1: Math.max(0, bbox.x1),
       y1: Math.max(0, bbox.y1),
@@ -226,9 +227,12 @@ function cpuBlurFrame(
     };
     const w = clamped.x2 - clamped.x1;
     const h = clamped.y2 - clamped.y1;
-    if (w < 2 || h < 2) continue; // skip degenerate boxes
+    if (w < 2 || h < 2) continue;
 
-    if (blurType === 'pixelate') {
+    const id = indexToId.get(idx);
+    const type = (id !== undefined ? blurTypeMap.get(id) : undefined) ?? fallbackType;
+
+    if (type === 'pixelate') {
       applyPixelateBlur(ctx, clamped);
     } else {
       applyEyeBarBlur(ctx, clamped);
@@ -347,15 +351,18 @@ const processAndExport = useCallback(async () => {
           // Build boxes + target indices from identity map
           const boxes: DetectionBox[] = [];
           const targetIndices = new Set<number>();
+          const indexToId = new Map<number, number>();
           for (const [id, box] of identityBoxes) {
             const idx = boxes.length;
+            indexToId.set(idx, id);
             boxes.push(box);
             if (selectedIds.has(id)) targetIndices.add(idx);
           }
 
           let outputData = imageData;
           if (targetIndices.size > 0) {
-            outputData = cpuBlurFrame(imageData, boxes, targetIndices, blurConfig.type);
+            outputData = cpuBlurFrame(imageData, boxes, targetIndices,
+              useProcessStore.getState().identityBlurTypes, indexToId, blurConfig.type);
           }
 
           const jpgName = `frame_${String(globalFrameCount + 1).padStart(4, '0')}.jpg`;
