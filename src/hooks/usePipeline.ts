@@ -350,18 +350,21 @@ const processAndExport = useCallback(async () => {
 
           const jpgName = `frame_${String(globalFrameCount + 1).padStart(4, '0')}.jpg`;
           jpgCtx.putImageData(outputData, 0, 0);
-          const blob = await jpgCanvas.convertToBlob({ type: 'image/jpeg', quality: 0.75 });
+          const blob = await jpgCanvas.convertToBlob({ type: 'image/jpeg', quality: 0.5 });
           await ffmpeg.writeFile(jpgName, new Uint8Array(await blob.arrayBuffer()));
 
           globalFrameCount++;
 
-          const pct = Math.round((globalFrameCount / totalFrames) * 100);
-          updateProgress({
-            phaseDescription: `Processing frames... (${globalFrameCount}/${totalFrames})`,
-            phasePercent: pct,
-            overallPercent: computeOverallPercent('processing-frames', pct),
-            detail: `Frame ${globalFrameCount}/${totalFrames}`,
-          });
+          // Throttle progress updates to avoid 859 React re-renders
+          if (globalFrameCount % 10 === 0 || globalFrameCount === totalFrames) {
+            const pct = Math.round((globalFrameCount / totalFrames) * 100);
+            updateProgress({
+              phaseDescription: `Processing frames... (${globalFrameCount}/${totalFrames})`,
+              phasePercent: pct,
+              overallPercent: computeOverallPercent('processing-frames', pct),
+              detail: `Frame ${globalFrameCount}/${totalFrames}`,
+            });
+          }
       }
 
       console.timeEnd('total-processing');

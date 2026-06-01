@@ -37,7 +37,7 @@ async function* decodeAndYield(
 
   // Process in batches: decode N chunks, yield all resulting frames, repeat.
   // This keeps memory bounded (~N frames in flight at a time).
-  const BATCH = 60;
+  const BATCH = 120;
 
   for (let batchStart = 0; batchStart < chunks.length; batchStart += BATCH) {
     if (signal.aborted) break;
@@ -61,7 +61,7 @@ async function* decodeAndYield(
     if (decodeError) break;
 
     // Small delay to let more frames arrive
-    await new Promise(r => setTimeout(r, 20));
+    await new Promise(r => setTimeout(r, 5));
 
     // Yield all frames that have been produced so far
     while (readyFrames.length > 0) {
