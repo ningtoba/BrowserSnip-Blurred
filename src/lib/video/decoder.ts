@@ -181,19 +181,47 @@ export async function* decodeFramesWebCodecs(
   const nalUnits = splitAnnexBNALs(annexB);
   console.debug('[WebCodecs] NAL units:', nalUnits.length);
 
-  // Build chunks: each NAL unit becomes one EncodedVideoChunk.
-  // SPS/PPS NALs (types 7,8) are non-key; IDR (type 5) is key.
+  // Group NALs into access units: accumulate until an IDR (keyframe),
+  // then combine SPS+PPS+IDR into a single key chunk. This satisfies
+  // the WebCodecs requirement that the first chunk must be a keyframe.
+  const START_CODE = new Uint8Array([0, 0, 0, 1]);
   const chunks: { data: Uint8Array; key: boolean }[] = [];
+  let pendingBufs: Uint8Array[] = [];
+  let pendingSize = 0;
+
+  function flushPending(key: boolean) {
+    if (pendingBufs.length === 0) return;
+    const combined = new Uint8Array(pendingSize);
+    let off = 0;
+    for (const buf of pendingBufs) { combined.set(buf, off); off += buf.length; }
+    chunks.push({ data: combined, key });
+    pendingBufs = [];
+    pendingSize = 0;
+  }
+
   for (const nal of nalUnits) {
     const nalType = nal.length > 3 ? (nal[3] & 0x1f) : 0;
-    const isKey = nalType === 5; // IDR
-    // Re-attach start code so the decoder gets proper Annex B format
-    const startCode = new Uint8Array([0, 0, 0, 1]);
-    const data = new Uint8Array(startCode.length + nal.length);
-    data.set(startCode, 0);
-    data.set(nal, startCode.length);
-    chunks.push({ data, key: isKey });
+    // Re-attach start code
+    const chunk = new Uint8Array(START_CODE.length + nal.length);
+    chunk.set(START_CODE, 0);
+    chunk.set(nal, START_CODE.length);
+
+    if (nalType === 5) {
+      // IDR: flush any preceding SPS/PPS + this IDR as one key chunk
+      pendingBufs.push(chunk);
+      pendingSize += chunk.length;
+      flushPending(true);
+    } else if (nalType === 7 || nalType === 8) {
+      // SPS/PPS: accumulate, will be merged with the next IDR
+      pendingBufs.push(chunk);
+      pendingSize += chunk.length;
+    } else {
+      // Non-IDR slice: flush any leftover SPS/PPS (shouldn't happen), then emit as delta
+      flushPending(false);
+      chunks.push({ data: chunk, key: false });
+    }
   }
+  flushPending(false); // flush any trailing data
 
   console.debug('[WebCodecs] chunks:', chunks.length,
     'keyframes:', chunks.filter(c => c.key).length);
