@@ -120,44 +120,35 @@ function splitAnnexBNALs(stream: Uint8Array): Uint8Array[] {
 }
 
 /**
- * Use ffmpeg.wasm to produce an Annex B H.264 bitstream.
- * The h264_mp4toannexb BSF converts length-prefixed NALs to start-coded NALs
- * and prepends SPS/PPS before each keyframe — exactly what WebCodecs needs
- * when no avcC description is provided.
+ * Use ffmpeg.wasm to produce an Annex B H.264 bitstream from any input format.
+ * Always transcodes to H.264 via libx264 (ultrafast) so the h264_mp4toannexb
+ * BSF works regardless of the source codec (AV1, H.265, VP9, etc.).
  */
 async function extractAnnexBStream(
   ffmpeg: import('@ffmpeg/ffmpeg').FFmpeg,
   videoFile: File
 ): Promise<Uint8Array> {
   const inputBuf = new Uint8Array(await videoFile.arrayBuffer());
-
-  // Step 1: remux to clean MP4 (handles any container format)
   await ffmpeg.writeFile('input.bin', inputBuf);
-  try {
-    await ffmpeg.exec(
-      ['-i', 'input.bin', '-c:v', 'copy', '-an', '-movflags', '+faststart', 'clean.mp4'],
-      120_000
-    );
-  } catch {
-    console.debug('[WebCodecs] copy remux failed, transcoding to H.264...');
-    await ffmpeg.exec(
-      ['-i', 'input.bin', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
-       '-an', '-movflags', '+faststart', 'clean.mp4'],
-      300_000
-    );
-  }
 
-  // Step 2: convert to Annex B H.264 bitstream
+  // Single step: transcode to H.264 Annex B bitstream.
+  // libx264 handles any input codec; -an strips audio; -bsf:v produces Annex B.
+  console.debug('[WebCodecs] transcoding to H.264 Annex B...');
   await ffmpeg.exec(
-    ['-i', 'clean.mp4', '-c:v', 'copy', '-bsf:v', 'h264_mp4toannexb', '-f', 'h264', 'output.h264'],
-    120_000
+    [
+      '-i', 'input.bin',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+      '-an',
+      '-bsf:v', 'h264_mp4toannexb',
+      '-f', 'h264',
+      'output.h264',
+    ],
+    300_000
   );
 
   const h264Data = await ffmpeg.readFile('output.h264');
 
-  // Clean up
   try { await ffmpeg.deleteFile('input.bin'); } catch { /* ignore */ }
-  try { await ffmpeg.deleteFile('clean.mp4'); } catch { /* ignore */ }
   try { await ffmpeg.deleteFile('output.h264'); } catch { /* ignore */ }
 
   if (typeof h264Data === 'string') throw new Error('Expected binary data from ffmpeg, got string');
