@@ -260,7 +260,8 @@ const processAndExport = useCallback(async () => {
       const identities = state.identities;
       const scanDetections = state.allDetections;
       let totalFrames = Math.ceil(metadata.duration * metadata.fps);
-      const { width, height, fps } = metadata;
+      const { width, height } = metadata;
+      let fps = metadata.fps;
       const ffmpeg = await getFFmpeg();
 
       let globalFrameCount = 0;
@@ -279,6 +280,8 @@ const processAndExport = useCallback(async () => {
         try {
           for await (const { imageData, timestamp } of decodeFramesWebCodecs(file, signal, (count) => {
             totalFrames = count;
+          }, (actualFps) => {
+            fps = actualFps;
           })) {
             await processFrame(imageData, timestamp);
           }
@@ -346,15 +349,15 @@ const processAndExport = useCallback(async () => {
             const matchedIds = new Set<number>();
             for (const p of pairs) {
               if (!matchedDets.has(p.detIdx) && !matchedIds.has(p.id)) {
-                const prev = identityBoxes.get(p.id)!;
+                const prevBox = identityBoxes.get(p.id)!;
                 const det = detectedBoxes[p.detIdx];
 
                 // Update velocity (EMA of frame-to-frame displacement)
                 const prevVel = identityVelocity.get(p.id);
-                const rawDx1 = det.x1 - prev.x1;
-                const rawDy1 = det.y1 - prev.y1;
-                const rawDx2 = det.x2 - prev.x2;
-                const rawDy2 = det.y2 - prev.y2;
+                const rawDx1 = det.x1 - prevBox.x1;
+                const rawDy1 = det.y1 - prevBox.y1;
+                const rawDx2 = det.x2 - prevBox.x2;
+                const rawDy2 = det.y2 - prevBox.y2;
                 const velAlpha = 0.5;
                 identityVelocity.set(p.id, {
                   dx1: prevVel ? prevVel.dx1 * (1 - velAlpha) + rawDx1 * velAlpha : rawDx1,
@@ -363,13 +366,13 @@ const processAndExport = useCallback(async () => {
                   dy2: prevVel ? prevVel.dy2 * (1 - velAlpha) + rawDy2 * velAlpha : rawDy2,
                 });
 
-                // EMA smoothing: blend detection with predicted position
-                const predicted = predictedBoxes.get(p.id)!;
+                // EMA smoothing: blend previous smoothed position with actual detection.
+                // Velocity is used ONLY for matching, NOT for the smoothed position.
                 identityBoxes.set(p.id, {
-                  x1: predicted.x1 * (1 - EMA_ALPHA) + det.x1 * EMA_ALPHA,
-                  y1: predicted.y1 * (1 - EMA_ALPHA) + det.y1 * EMA_ALPHA,
-                  x2: predicted.x2 * (1 - EMA_ALPHA) + det.x2 * EMA_ALPHA,
-                  y2: predicted.y2 * (1 - EMA_ALPHA) + det.y2 * EMA_ALPHA,
+                  x1: prevBox.x1 * (1 - EMA_ALPHA) + det.x1 * EMA_ALPHA,
+                  y1: prevBox.y1 * (1 - EMA_ALPHA) + det.y1 * EMA_ALPHA,
+                  x2: prevBox.x2 * (1 - EMA_ALPHA) + det.x2 * EMA_ALPHA,
+                  y2: prevBox.y2 * (1 - EMA_ALPHA) + det.y2 * EMA_ALPHA,
                   confidence: det.confidence,
                 });
                 matchedDets.add(p.detIdx);

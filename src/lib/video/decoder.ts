@@ -175,16 +175,18 @@ function serializeAvcC(avcCBox: any): Uint8Array {
 function demuxMP4(mp4Buf: ArrayBuffer): Promise<{
   config: VideoDecoderConfig;
   chunks: { data: ArrayBuffer; key: boolean }[];
+  trackDuration: number;
+  trackTimescale: number;
 }> {
   return new Promise((resolve, reject) => {
     const file = createFile();
     const samples: { data: ArrayBuffer; key: boolean }[] = [];
     let config: VideoDecoderConfig | null = null;
+    let trackDuration = 0;
+    let trackTimescale = 1;
     let ready = false;
 
     file.onReady = (_info: any) => {
-      // Access the internal trak structure — mp4box's getInfo() doesn't
-      // include the description field, but the parsed boxes are still there
       const trak = (file as any).moov?.traks?.[0];
       const sampleEntry = trak?.mdia?.minf?.stbl?.stsd?.entries?.[0];
       const avcCBox = sampleEntry?.avcC;
@@ -194,6 +196,10 @@ function demuxMP4(mp4Buf: ArrayBuffer): Promise<{
       const codec = sampleEntry.getCodec();
       const width = sampleEntry.getWidth?.() ?? 0;
       const height = sampleEntry.getHeight?.() ?? 0;
+
+      // Get actual duration and timescale from the track
+      trackDuration = trak?.mdia?.mdhd?.duration ?? 0;
+      trackTimescale = trak?.mdia?.mdhd?.timescale ?? 1;
 
       config = { codec, codedWidth: width, codedHeight: height };
 
@@ -231,8 +237,9 @@ function demuxMP4(mp4Buf: ArrayBuffer): Promise<{
         clearInterval(check);
         console.debug('[mp4box] samples:', samples.length,
           'keyframes:', samples.filter(s => s.key).length,
-          'codec:', config.codec);
-        resolve({ config, chunks: samples });
+          'codec:', config.codec,
+          'duration:', trackDuration, 'timescale:', trackTimescale);
+        resolve({ config, chunks: samples, trackDuration, trackTimescale });
       }
     }, 50);
     setTimeout(() => { clearInterval(check); reject(new Error('mp4box extraction timed out')); }, 30000);
@@ -242,7 +249,8 @@ function demuxMP4(mp4Buf: ArrayBuffer): Promise<{
 export async function* decodeFramesWebCodecs(
   videoFile: File,
   signal: AbortSignal,
-  onTotalFrames?: (count: number) => void
+  onTotalFrames?: (count: number) => void,
+  onActualFps?: (fps: number) => void
 ): AsyncGenerator<DecodedFrame> {
   const { getFFmpeg } = await import('@/lib/ffmpeg/core');
   const ffmpeg = await getFFmpeg();
@@ -297,10 +305,18 @@ export async function* decodeFramesWebCodecs(
 
   // mp4box demuxes the MP4 into codec config + encoded samples
   const mp4Buf = mp4Data.buffer.slice(mp4Data.byteOffset, mp4Data.byteOffset + mp4Data.byteLength);
-  const { config, chunks } = await demuxMP4(mp4Buf);
+  const { config, chunks, trackDuration, trackTimescale } = await demuxMP4(mp4Buf);
 
-  // Report the actual frame count (from mp4box sample count, not metadata)
+  // Report actual frame count and fps from mp4box (not metadata)
   onTotalFrames?.(chunks.length);
+  if (trackDuration > 0 && trackTimescale > 0) {
+    const actualDuration = trackDuration / trackTimescale;
+    const actualFps = chunks.length / actualDuration;
+    onActualFps?.(actualFps);
+    console.debug('[WebCodecs] actual fps:', actualFps.toFixed(2),
+      'duration:', actualDuration.toFixed(2) + 's',
+      'frames:', chunks.length);
+  }
 
   // VideoDecoder decodes the samples
   yield* decodeAndYield(config, chunks, signal);
