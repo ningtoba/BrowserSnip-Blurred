@@ -383,13 +383,13 @@ const processAndExport = useCallback(async () => {
           globalFrameCount++;
 
           // Throttle progress updates to avoid 859 React re-renders
-          if (globalFrameCount % 10 === 0 || globalFrameCount === totalFrames) {
-            const pct = Math.round((globalFrameCount / totalFrames) * 100);
+          if (globalFrameCount % 10 === 0) {
+            const pct = Math.min(99, Math.round((globalFrameCount / totalFrames) * 100));
             updateProgress({
-              phaseDescription: `Processing frames... (${globalFrameCount}/${totalFrames})`,
+              phaseDescription: `Processing frames... ${globalFrameCount}`,
               phasePercent: pct,
               overallPercent: computeOverallPercent('processing-frames', pct),
-              detail: `Frame ${globalFrameCount}/${totalFrames}`,
+              detail: `Frame ${globalFrameCount}`,
             });
           }
       }
