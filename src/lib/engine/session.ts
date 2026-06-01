@@ -1,7 +1,7 @@
 import * as ort from 'onnxruntime-web';
 import { MODELS } from '@/lib/constants';
 
-type ModelName = 'yunet' | 'mfn';
+type ModelName = 'scrfd' | 'yunet' | 'mfn';
 
 interface SessionEntry {
   session: ort.InferenceSession;

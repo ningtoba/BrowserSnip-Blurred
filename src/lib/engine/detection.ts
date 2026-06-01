@@ -1,4 +1,4 @@
-import { detectFacesYuNet } from '@/lib/engine/yunet';
+import { detectFacesSCRFD } from '@/lib/engine/scrfd';
 import type { DetectionBox } from '@/types';
 
 export async function detectFaces(
@@ -6,5 +6,5 @@ export async function detectFaces(
   origWidth: number,
   origHeight: number
 ): Promise<DetectionBox[]> {
-  return detectFacesYuNet(imageData, origWidth, origHeight);
+  return detectFacesSCRFD(imageData, origWidth, origHeight);
 }
