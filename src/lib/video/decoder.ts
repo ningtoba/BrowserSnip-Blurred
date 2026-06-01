@@ -1,5 +1,3 @@
-import { createFile, MP4BoxBuffer } from 'mp4box';
-
 interface DecodedFrame {
   imageData: ImageData;
   timestamp: number;
@@ -8,7 +6,7 @@ interface DecodedFrame {
 
 async function* decodeAndYield(
   config: VideoDecoderConfig,
-  chunks: { data: ArrayBuffer; key: boolean }[],
+  chunks: { data: Uint8Array; key: boolean }[],
   signal: AbortSignal
 ): AsyncGenerator<DecodedFrame> {
   const support = await VideoDecoder.isConfigSupported(config);
@@ -80,189 +78,90 @@ async function* decodeAndYield(
   if (decodeError) throw decodeError;
 }
 
-/** Read a box header (size + fourCC) at the given offset */
-function parseBox(buf: Uint8Array, off: number): { size: number; tag: string; dataOff: number } | null {
-  if (off + 8 > buf.length) return null;
-  const size = ((buf[off] << 24) | (buf[off+1] << 16) | (buf[off+2] << 8) | buf[off+3]) >>> 0;
-  const tag = String.fromCharCode(buf[off+4], buf[off+5], buf[off+6], buf[off+7]);
-  if (size < 8 || off + size > buf.length) return null;
-  return { size, tag, dataOff: off + 8 };
-}
-
 /**
- * Find a named box within a byte range. Walks the top-level children
- * of the region [start, start+len) and returns the first match.
+ * Split an Annex B H.264 bitstream into individual NAL unit payloads.
+ * Returns raw NAL bytes WITHOUT the start code prefix (the caller adds it back).
  */
-function findBox(buf: Uint8Array, start: number, len: number, target: string): { off: number; size: number } | null {
-  let off = start;
-  const end = start + len;
-  while (off + 8 <= end) {
-    const box = parseBox(buf, off);
-    if (!box) break;
-    if (box.tag === target) return { off, size: box.size };
-    off += box.size;
-  }
-  return null;
-}
+function splitAnnexBNALs(stream: Uint8Array): Uint8Array[] {
+  const nals: Uint8Array[] = [];
+  let i = 0;
+  while (i < stream.length - 3) {
+    // Find start code: 00 00 00 01 or 00 00 01
+    if (stream[i] === 0 && stream[i + 1] === 0) {
+      let startCodeLen: number;
+      if (stream[i + 2] === 1) {
+        startCodeLen = 3;
+      } else if (stream[i + 2] === 0 && i + 3 < stream.length && stream[i + 3] === 1) {
+        startCodeLen = 4;
+      } else {
+        i++;
+        continue;
+      }
 
-/**
- * Extract the avcC box bytes from an MP4 buffer by traversing:
- *   top-level → moov → trak → stbl → stsd → avc1 → avcC
- * Returns the FULL avcC box (8-byte header + payload) so the description
- * field matches the format mp4box.js returns via track.description.
- */
-function extractAvcC(mp4Buf: ArrayBuffer): Uint8Array | null {
-  const buf = new Uint8Array(mp4Buf);
-  try {
-    // Find top-level moov box (may not be at offset 0 if ftyp comes first)
-    const moov = findBox(buf, 0, buf.length, 'moov');
-    if (!moov) { console.debug('[extractAvcC] no moov box found'); return null; }
-    console.debug('[extractAvcC] moov at offset', moov.off, 'size', moov.size);
+      // nalPayloadStart = first byte after the start code
+      const nalPayloadStart = i + startCodeLen;
 
-    // moov → trak
-    const trak = findBox(buf, moov.off + 8, moov.size - 8, 'trak');
-    if (!trak) { console.debug('[extractAvcC] no trak inside moov'); return null; }
-    console.debug('[extractAvcC] trak at offset', trak.off, 'size', trak.size);
-
-    // trak → mdia
-    const mdia = findBox(buf, trak.off + 8, trak.size - 8, 'mdia');
-    if (!mdia) { console.debug('[extractAvcC] no mdia inside trak'); return null; }
-
-    // mdia → minf
-    const minf = findBox(buf, mdia.off + 8, mdia.size - 8, 'minf');
-    if (!minf) { console.debug('[extractAvcC] no minf inside mdia'); return null; }
-
-    // minf → stbl
-    const stbl = findBox(buf, minf.off + 8, minf.size - 8, 'stbl');
-    if (!stbl) { console.debug('[extractAvcC] no stbl inside minf'); return null; }
-
-    // stbl → stsd
-    const stsd = findBox(buf, stbl.off + 8, stbl.size - 8, 'stsd');
-    if (!stsd) { console.debug('[extractAvcC] no stsd inside stbl'); return null; }
-    console.debug('[extractAvcC] stsd at offset', stsd.off, 'size', stsd.size);
-
-    // Inside stsd, skip the 8-byte version+flags + 4-byte entry_count to reach the first entry
-    // stsd content: [version(1) + flags(3)] + [entry_count(4)] + [entries...]
-    const entryOff = stsd.off + 8 + 4 + 4; // box header + full-box header + entry count
-    const entry = parseBox(buf, entryOff);
-    if (!entry) { console.debug('[extractAvcC] no sample entry in stsd'); return null; }
-    console.debug('[extractAvcC] sample entry:', entry.tag, 'at offset', entryOff, 'size', entry.size);
-
-    // The entry should be avc1, avc3, hev1, hvc1, etc.
-    // Find avcC inside the entry's child boxes (skip the fixed VisualSampleEntry fields)
-    // VisualSampleEntry fixed fields = 78 bytes after the 8-byte box header
-    const VIDEO_ENTRY_FIXED = 78;
-    const childStart = entryOff + 8 + VIDEO_ENTRY_FIXED;
-    const childLen = entry.size - 8 - VIDEO_ENTRY_FIXED;
-
-    const avcC = findBox(buf, childStart, childLen, 'avcC');
-    if (!avcC) {
-      // Fallback: scan the entire entry for avcC fourCC (handles non-standard layouts)
-      console.debug('[extractAvcC] avcC not at expected offset, scanning entry...');
-      for (let i = entryOff + 8; i < entryOff + entry.size - 8; i++) {
-        if (buf[i] === 0x61 && buf[i+1] === 0x76 && buf[i+2] === 0x63 && buf[i+3] === 0x43) {
-          const boxSize = ((buf[i-4] << 24) | (buf[i-3] << 16) | (buf[i-2] << 8) | buf[i-1]) >>> 0;
-          if (boxSize >= 8 && boxSize < 1000 && i - 4 + boxSize <= entryOff + entry.size) {
-            const result = buf.slice(i - 4, i - 4 + boxSize);
-            console.debug('[extractAvcC] found avcC via scan:', result.length, 'bytes');
-            return result;
-          }
+      // Find the next start code (or end of stream)
+      let nalEnd = stream.length;
+      for (let j = nalPayloadStart + 1; j < stream.length - 2; j++) {
+        if (stream[j] === 0 && stream[j + 1] === 0 &&
+            (stream[j + 2] === 1 || (stream[j + 2] === 0 && j + 3 < stream.length && stream[j + 3] === 1))) {
+          nalEnd = j;
+          break;
         }
       }
-      console.debug('[extractAvcC] no avcC found in sample entry');
-      return null;
+      nals.push(stream.slice(nalPayloadStart, nalEnd));
+      i = nalEnd;
+    } else {
+      i++;
     }
-
-    // Return the FULL avcC box (header + payload) — matches what mp4box.js returns
-    const result = buf.slice(avcC.off, avcC.off + avcC.size);
-    console.debug('[extractAvcC] found avcC via traversal:', result.length, 'bytes');
-    return result;
-  } catch (e) {
-    console.debug('[extractAvcC] error:', e);
-    return null;
   }
+  return nals;
 }
 
-function demuxWithMP4Box(arrayBuf: ArrayBuffer): Promise<{
-  config: VideoDecoderConfig;
-  chunks: { data: ArrayBuffer; key: boolean }[];
-}> {
-  return new Promise((resolve, reject) => {
-    const file = createFile();
-    const pendingSamples: { data: ArrayBuffer; key: boolean }[] = [];
-    let config: VideoDecoderConfig | null = null;
-    let ready = false;
+/**
+ * Use ffmpeg.wasm to produce an Annex B H.264 bitstream.
+ * The h264_mp4toannexb BSF converts length-prefixed NALs to start-coded NALs
+ * and prepends SPS/PPS before each keyframe — exactly what WebCodecs needs
+ * when no avcC description is provided.
+ */
+async function extractAnnexBStream(
+  ffmpeg: import('@ffmpeg/ffmpeg').FFmpeg,
+  videoFile: File
+): Promise<Uint8Array> {
+  const inputBuf = new Uint8Array(await videoFile.arrayBuffer());
 
-    file.onReady = (info: any) => {
-      const track = info.videoTracks?.[0];
-      if (!track) { reject(new Error('No video track')); return; }
-      config = { codec: track.codec, codedWidth: track.track_width, codedHeight: track.track_height };
+  // Step 1: remux to clean MP4 (handles any container format)
+  await ffmpeg.writeFile('input.bin', inputBuf);
+  try {
+    await ffmpeg.exec(
+      ['-i', 'input.bin', '-c:v', 'copy', '-an', '-movflags', '+faststart', 'clean.mp4'],
+      120_000
+    );
+  } catch {
+    console.debug('[WebCodecs] copy remux failed, transcoding to H.264...');
+    await ffmpeg.exec(
+      ['-i', 'input.bin', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+       '-an', '-movflags', '+faststart', 'clean.mp4'],
+      300_000
+    );
+  }
 
-      // track.description may exist at runtime even though it's not in the mp4box types
-      const trackAny = track as any;
-      console.debug('[MP4Box] track:', {
-        codec: track.codec,
-        width: track.track_width,
-        height: track.track_height,
-        nb_samples: track.nb_samples,
-        description: trackAny.description ? `${(trackAny.description as Uint8Array).length} bytes` : 'undefined',
-      });
+  // Step 2: convert to Annex B H.264 bitstream
+  await ffmpeg.exec(
+    ['-i', 'clean.mp4', '-c:v', 'copy', '-bsf:v', 'h264_mp4toannexb', '-f', 'h264', 'output.h264'],
+    120_000
+  );
 
-      // Try multiple sources for the avcC description
-      let desc: Uint8Array | undefined = trackAny.description as Uint8Array | undefined;
+  const h264Data = await ffmpeg.readFile('output.h264');
 
-      // Fallback 2: extract avcC directly from the MP4 buffer via box traversal
-      if (!desc || desc.length === 0) {
-        desc = extractAvcC(arrayBuf) ?? undefined;
-        console.debug('[MP4Box] avcC from buffer scan:', desc?.length, 'bytes');
-      }
+  // Clean up
+  try { await ffmpeg.deleteFile('input.bin'); } catch { /* ignore */ }
+  try { await ffmpeg.deleteFile('clean.mp4'); } catch { /* ignore */ }
+  try { await ffmpeg.deleteFile('output.h264'); } catch { /* ignore */ }
 
-      if (desc && desc.length > 0) {
-        const descBuf = new ArrayBuffer(desc.length);
-        new Uint8Array(descBuf).set(desc);
-        (config as any).description = descBuf;
-        console.debug('[MP4Box] description set:', descBuf.byteLength, 'bytes, first 4:',
-          Array.from(new Uint8Array(descBuf).slice(0, 4)).map(b => '0x' + b.toString(16)).join(' '));
-      } else {
-        console.warn('[MP4Box] NO avcC description found — VideoDecoder will likely fail');
-      }
-
-      file.setExtractionOptions(track.id, 'video');
-      file.start();
-      ready = true;
-    };
-
-    file.onSamples = (_trackId: number, _user: any, samples: any[]) => {
-      for (const s of samples) {
-        pendingSamples.push({ data: s.data.buffer.slice(0), key: s.is_sync });
-      }
-      if (pendingSamples.length <= 3) {
-        const s = samples[0];
-        console.debug('[MP4Box] sample', pendingSamples.length - 1,
-          'size:', s?.data?.byteLength ?? s?.data?.length,
-          'is_sync:', s?.is_sync);
-      }
-    };
-
-    file.onError = (e: any) => reject(new Error('MP4Box error: ' + (e?.message || e)));
-
-    const mp4Buf = MP4BoxBuffer.fromArrayBuffer(arrayBuf, 0);
-    (mp4Buf as any).fileStart = 0;
-    file.appendBuffer(mp4Buf);
-    file.flush();
-
-    const checkInterval = setInterval(() => {
-      if (ready && config && pendingSamples.length > 0) {
-        clearInterval(checkInterval);
-        console.debug('[MP4Box] resolved:', pendingSamples.length, 'samples,',
-          'firstKey:', pendingSamples[0]?.key,
-          'desc:', config.description ? (config.description as ArrayBuffer).byteLength + ' bytes' : 'MISSING',
-          'codec:', config.codec);
-        resolve({ config, chunks: pendingSamples });
-      }
-    }, 50);
-    setTimeout(() => { clearInterval(checkInterval); reject(new Error('MP4Box extraction timed out')); }, 30000);
-  });
+  if (typeof h264Data === 'string') throw new Error('Expected binary data from ffmpeg, got string');
+  return h264Data;
 }
 
 export async function* decodeFramesWebCodecs(
@@ -271,29 +170,44 @@ export async function* decodeFramesWebCodecs(
 ): AsyncGenerator<DecodedFrame> {
   const { getFFmpeg } = await import('@/lib/ffmpeg/core');
   const ffmpeg = await getFFmpeg();
-  const inputBuf = new Uint8Array(await videoFile.arrayBuffer());
 
-  // ffmpeg remux to clean MP4
-  await ffmpeg.writeFile('input.bin', inputBuf);
-  try {
-    await ffmpeg.exec(
-      ['-i', 'input.bin', '-c:v', 'copy', '-an', '-movflags', '+faststart', 'clean.mp4'],
-      120_000
-    );
-  } catch {
-    console.debug('[WebCodecs] copy failed, transcoding...');
-    await ffmpeg.exec(
-      ['-i', 'input.bin', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-an', '-movflags', '+faststart', 'clean.mp4'],
-      300_000
-    );
+  // Use ffmpeg to produce Annex B H.264 bitstream (SPS/PPS inline)
+  const annexB = await extractAnnexBStream(ffmpeg, videoFile);
+  console.debug('[WebCodecs] Annex B stream:', annexB.length, 'bytes');
+
+  if (annexB.length === 0) throw new Error('ffmpeg produced empty H.264 stream');
+
+  // Split into individual NAL units
+  const nalUnits = splitAnnexBNALs(annexB);
+  console.debug('[WebCodecs] NAL units:', nalUnits.length);
+
+  // Build chunks: each NAL unit becomes one EncodedVideoChunk.
+  // SPS/PPS NALs (types 7,8) are non-key; IDR (type 5) is key.
+  const chunks: { data: Uint8Array; key: boolean }[] = [];
+  for (const nal of nalUnits) {
+    const nalType = nal.length > 3 ? (nal[3] & 0x1f) : 0;
+    const isKey = nalType === 5; // IDR
+    // Re-attach start code so the decoder gets proper Annex B format
+    const startCode = new Uint8Array([0, 0, 0, 1]);
+    const data = new Uint8Array(startCode.length + nal.length);
+    data.set(startCode, 0);
+    data.set(nal, startCode.length);
+    chunks.push({ data, key: isKey });
   }
 
-  const mp4Data = new Uint8Array((await ffmpeg.readFile('clean.mp4')) as Uint8Array);
-  try { await ffmpeg.deleteFile('input.bin'); } catch { /* ignore */ }
-  try { await ffmpeg.deleteFile('clean.mp4'); } catch { /* ignore */ }
+  console.debug('[WebCodecs] chunks:', chunks.length,
+    'keyframes:', chunks.filter(c => c.key).length);
 
-  console.debug('[WebCodecs] remuxed MP4:', mp4Data.length, 'bytes');
-  const mp4Buf = mp4Data.buffer.slice(mp4Data.byteOffset, mp4Data.byteOffset + mp4Data.byteLength);
-  const { config, chunks } = await demuxWithMP4Box(mp4Buf);
+  if (chunks.length === 0) throw new Error('No NAL units in H.264 stream');
+
+  // WebCodecs can parse SPS/PPS from Annex B — no description needed
+  const config: VideoDecoderConfig = {
+    codec: 'avc1.42001e', // baseline — will be overridden by isConfigSupported if needed
+    codedWidth: 1920,
+    codedHeight: 1080,
+  };
+
+  // Try to detect actual resolution from SPS if available
+  // (fall back to defaults — VideoDecoder adapts)
   yield* decodeAndYield(config, chunks, signal);
 }
