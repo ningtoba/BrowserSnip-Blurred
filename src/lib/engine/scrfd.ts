@@ -3,7 +3,7 @@ import type { DetectionBox } from '@/types';
 
 const SCRFD_INPUT_SIZE = 640;
 const STRIDES = [8, 16, 32];
-const SCORE_THRESH = 0.65;
+const SCORE_THRESH = 0.5;
 const NMS_THRESH = 0.3;
 
 function sigmoid(x: number): number {
@@ -95,15 +95,14 @@ export async function detectFacesSCRFD(
     const bboxData = (await bboxTensor.getData()) as Float32Array;
     const totalAnchors = scoreData.length;
 
-    // Flat indexing: iterate all anchors, derive position from index
+    // Try interleaved indexing: pos0_anchor0, pos0_anchor1, pos1_anchor0, ...
     for (let idx = 0; idx < totalAnchors; idx++) {
       const score = scoreData[idx]; // model outputs probabilities directly
       if (score < SCORE_THRESH) continue;
 
-      // Derive grid position from flat index
-      // Try: idx = pos * numAnchors + anchorIdx (interleaved)
-      // The position in the feature map determines the anchor center
-      const pos = Math.floor(idx / Math.ceil(totalAnchors / numPositions));
+      // Interleaved: idx = pos * numAnchorsPerPos + anchorIdx
+      const numAnchorsPerPos = Math.ceil(totalAnchors / numPositions);
+      const pos = Math.floor(idx / numAnchorsPerPos);
       const col = pos % featW;
       const row = Math.floor(pos / featW);
       const cx = col * stride;
@@ -131,6 +130,17 @@ export async function detectFacesSCRFD(
   }
 
   const kept = nms(allDets, NMS_THRESH);
+
+  // Debug: log all post-NMS detections
+  if (kept.length > 0) {
+    console.debug(`[SCRFD] post-NMS: ${kept.length} detections`);
+    for (const d of kept) {
+      const w = d.x2 - d.x1;
+      const h = d.y2 - d.y1;
+      const aspect = (w / h).toFixed(2);
+      console.debug(`  score=${d.score.toFixed(3)} pos=(${d.x1.toFixed(0)},${d.y1.toFixed(0)})-${d.x2.toFixed(0)},${d.y2.toFixed(0)} size=${w.toFixed(0)}x${h.toFixed(0)} aspect=${aspect}`);
+    }
+  }
 
   return kept
     .filter((d) => {
