@@ -14,6 +14,7 @@ import { detectFaces } from '@/lib/engine/detection';
 import { recognizeFace } from '@/lib/engine/recognition';
 import { applyPixelateBlur, applyEyeBarBlur, applyBlackBoxBlur } from '@/lib/engine/blur';
 import { KalmanBox } from '@/lib/engine/kalman';
+import { hungarianMatch } from '@/lib/engine/hungarian';
 import { computeIOU } from '@/lib/engine/tracking';
 import { SAMPLE_FPS, PHASE_WEIGHTS, DETECT_EVERY_N_FRAMES } from '@/lib/constants';
 import type { FaceDetection, DetectionBox, FaceIdentity, PipelinePhase, BlurType } from '@/types';
@@ -317,28 +318,40 @@ const processAndExport = useCallback(async () => {
             const detectedBoxes = await detectFaces(imageData, width, height);
 
             // ── Step 1: Predict positions for all tracked identities ──
-            const predictedBoxes = new Map<number, DetectionBox>();
-            for (const [id, kf] of identityKalman) {
-              predictedBoxes.set(id, kf.predict());
+            const trackedIds = Array.from(identityKalman.keys());
+            const predictedBoxes: DetectionBox[] = [];
+            for (const id of trackedIds) {
+              predictedBoxes.push(identityKalman.get(id)!.predict());
             }
 
-            // ── Step 2: Match detections to predicted positions (greedy IOU) ──
-            const pairs: { detIdx: number; id: number; iou: number }[] = [];
-            for (let ci = 0; ci < detectedBoxes.length; ci++) {
-              for (const [id, predBox] of predictedBoxes) {
-                const iou = computeIOU(detectedBoxes[ci], predBox);
-                if (iou > 0.1) pairs.push({ detIdx: ci, id, iou });
-              }
-            }
-            pairs.sort((a, b) => b.iou - a.iou);
-
+            // ── Step 2: Hungarian matching (globally optimal one-to-one) ──
             const matchedDets = new Set<number>();
             const matchedIds = new Set<number>();
-            for (const p of pairs) {
-              if (matchedDets.has(p.detIdx) || matchedIds.has(p.id)) continue;
-              identityKalman.get(p.id)!.update(detectedBoxes[p.detIdx]);
-              matchedDets.add(p.detIdx);
-              matchedIds.add(p.id);
+
+            if (trackedIds.length > 0 && detectedBoxes.length > 0) {
+              // Build cost matrix: cost = 1 - IOU (lower = better match)
+              const costMatrix: number[][] = [];
+              const iouThreshold = 0.05; // very lenient — let Hungarian find the best assignment
+              for (let di = 0; di < detectedBoxes.length; di++) {
+                const row: number[] = [];
+                for (let ti = 0; ti < trackedIds.length; ti++) {
+                  const iou = computeIOU(detectedBoxes[di], predictedBoxes[ti]);
+                  row.push(iou >= iouThreshold ? 1 - iou : 1000); // 1000 = impossible match
+                }
+                costMatrix.push(row);
+              }
+
+              const matches = hungarianMatch(costMatrix);
+              for (const m of matches) {
+                const detIdx = m.row;
+                const trackIdx = m.col;
+                if (costMatrix[detIdx][trackIdx] >= 1000) continue; // skip impossible matches
+
+                const id = trackedIds[trackIdx];
+                identityKalman.get(id)!.update(detectedBoxes[detIdx]);
+                matchedDets.add(detIdx);
+                matchedIds.add(id);
+              }
             }
 
             // ── Step 3: Unmatched detections → scan-phase identity matching ──
@@ -359,7 +372,7 @@ const processAndExport = useCallback(async () => {
                 matchedDets.add(ci);
               }
             }
-            // Unmatched identities: Kalman filter already predicted their position
+            // Unmatched identities: Kalman keeps predicting from last known motion
           } else {
             // Non-detection frames: Kalman filter predicts positions
             for (const [, kf] of identityKalman) {
