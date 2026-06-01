@@ -128,27 +128,6 @@ export async function preprocessCHW(
   );
 }
 
-export async function preprocessYuNet(
-  imageData: ImageData
-): Promise<{
-  tensor: ort.Tensor;
-  scale: number;
-  padLeft: number;
-  padTop: number;
-}> {
-  const { scale, padLeft, padTop } = letterboxParams(
-    imageData.width, imageData.height, YUNET_INPUT_SIZE, YUNET_INPUT_SIZE,
-  );
-  const data = await runNormalizeShader(
-    imageData, YUNET_INPUT_SIZE, YUNET_INPUT_SIZE,
-    { mean: [0, 0, 0], std: [255, 255, 255] },
-  );
-  return {
-    tensor: new ort.Tensor('float32', data, [1, 3, YUNET_INPUT_SIZE, YUNET_INPUT_SIZE]),
-    scale, padLeft, padTop,
-  };
-}
-
 export async function preprocessMFN(
   faceImageData: ImageData
 ): Promise<ort.Tensor> {

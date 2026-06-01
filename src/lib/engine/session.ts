@@ -1,7 +1,7 @@
 import * as ort from 'onnxruntime-web';
 import { MODELS } from '@/lib/constants';
 
-type ModelName = 'scrfd' | 'yunet' | 'mfn';
+type ModelName = 'scrfd' | 'mfn';
 
 interface SessionEntry {
   session: ort.InferenceSession;
@@ -85,7 +85,7 @@ export async function initSession(name: ModelName, signal?: AbortSignal): Promis
     }
 
     // Use WASM backend — WebGPU JSEP has severe GPU↔CPU op switching overhead
-    // that makes small models like YuNet run 100x+ slower than expected
+    // that makes small models run 100x+ slower than expected
     const session = await createWasmSession(buffer);
     const backend: 'webgpu' | 'wasm' = 'wasm';
 
