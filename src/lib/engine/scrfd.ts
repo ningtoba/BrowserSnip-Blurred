@@ -3,7 +3,7 @@ import type { DetectionBox } from '@/types';
 
 const SCRFD_INPUT_SIZE = 640;
 const STRIDES = [8, 16, 32];
-const SCORE_THRESH = 0.5;
+const SCORE_THRESH = 0.63;
 const NMS_THRESH = 0.3;
 
 function sigmoid(x: number): number {
@@ -130,18 +130,6 @@ export async function detectFacesSCRFD(
   }
 
   const kept = nms(allDets, NMS_THRESH);
-
-  // Debug: log all post-NMS detections
-  if (kept.length > 0) {
-    console.debug(`[SCRFD] post-NMS: ${kept.length} detections`);
-    for (const d of kept) {
-      const w = d.x2 - d.x1;
-      const h = d.y2 - d.y1;
-      const aspect = (w / h).toFixed(2);
-      console.debug(`  score=${d.score.toFixed(3)} pos=(${d.x1.toFixed(0)},${d.y1.toFixed(0)})-${d.x2.toFixed(0)},${d.y2.toFixed(0)} size=${w.toFixed(0)}x${h.toFixed(0)} aspect=${aspect}`);
-    }
-  }
-
   return kept
     .filter((d) => {
       const w = d.x2 - d.x1;
