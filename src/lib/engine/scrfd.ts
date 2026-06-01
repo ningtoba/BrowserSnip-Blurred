@@ -4,7 +4,7 @@ import type { DetectionBox } from '@/types';
 const SCRFD_INPUT_SIZE = 640;
 const STRIDES = [8, 16, 32];
 const NUM_ANCHORS = 2;
-const SCORE_THRESH = 0.5;
+const SCORE_THRESH = 0.9;
 const NMS_THRESH = 0.4;
 
 function sigmoid(x: number): number {
@@ -77,6 +77,8 @@ export async function detectFacesSCRFD(
   feeds[session.inputNames[0]] = tensor;
   const results = await session.run(feeds);
 
+  console.debug('[SCRFD] output names:', Object.keys(results));
+
   const allDets: { x1: number; y1: number; x2: number; y2: number; score: number }[] = [];
 
   for (let li = 0; li < STRIDES.length; li++) {
@@ -85,8 +87,19 @@ export async function detectFacesSCRFD(
     const featW = Math.floor(modelW / stride);
     const numPositions = featH * featW;
 
-    const scoreData = (await results[`score_${stride}`].getData()) as Float32Array;
-    const bboxData = (await results[`bbox_${stride}`].getData()) as Float32Array;
+    const scoreKey = `score_${stride}`;
+    const bboxKey = `bbox_${stride}`;
+    const scoreTensor = results[scoreKey];
+    const bboxTensor = results[bboxKey];
+    if (!scoreTensor || !bboxTensor) {
+      console.warn(`[SCRFD] missing output: ${scoreKey} or ${bboxKey}`);
+      continue;
+    }
+
+    const scoreData = (await scoreTensor.getData()) as Float32Array;
+    const bboxData = (await bboxTensor.getData()) as Float32Array;
+
+    console.debug(`[SCRFD] stride ${stride}: score shape=[${scoreTensor.dims}], bbox shape=[${bboxTensor.dims}], numPositions=${numPositions}`);
 
     // SCRFD anchor layout: all anchor-0 positions, then all anchor-1 positions
     // Each anchor center = (col * stride, row * stride) in model space
@@ -120,13 +133,26 @@ export async function detectFacesSCRFD(
       }
     }
 
-    results[`score_${stride}`].dispose();
-    results[`bbox_${stride}`].dispose();
+    scoreTensor.dispose();
+    bboxTensor.dispose();
     if (results[`kps_${stride}`]) results[`kps_${stride}`].dispose();
   }
 
   // NMS
+  console.debug('[SCRFD] pre-NMS:', allDets.length, 'detections');
+  if (allDets.length > 0) {
+    const sample = allDets[0];
+    console.debug('[SCRFD] sample det:', {
+      x1: sample.x1.toFixed(1), y1: sample.y1.toFixed(1),
+      x2: sample.x2.toFixed(1), y2: sample.y2.toFixed(1),
+      score: sample.score.toFixed(3),
+      w: (sample.x2 - sample.x1).toFixed(1),
+      h: (sample.y2 - sample.y1).toFixed(1),
+    });
+  }
+
   const kept = nms(allDets, NMS_THRESH);
+  console.debug('[SCRFD] post-NMS:', kept.length);
 
   // Filter: aspect ratio (faces are roughly square) and minimum size
   return kept
