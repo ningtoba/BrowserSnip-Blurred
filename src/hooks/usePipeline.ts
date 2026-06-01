@@ -262,11 +262,9 @@ const processAndExport = useCallback(async () => {
       const ffmpeg = await getFFmpeg();
 
       let globalFrameCount = 0;
-      let lastDetFrame = 0;
-      // Per-identity tracking: two most recent detection positions + interpolated output.
-      const identityDetCur = new Map<number, DetectionBox>();   // most recent detection
-      const identityDetPrev = new Map<number, DetectionBox>();  // second most recent detection
-      const identityBoxes = new Map<number, DetectionBox>();    // output (interpolated or detected)
+      // Per-identity tracking with EMA smoothing to eliminate jitter.
+      const identityBoxes = new Map<number, DetectionBox>(); // smoothed output
+      const EMA_ALPHA = 0.7; // 0 = ignore new detection, 1 = no smoothing
       const jpgCanvas = new OffscreenCanvas(width, height);
       const jpgCtx = jpgCanvas.getContext('2d', { willReadFrequently: true })!;
 
@@ -288,8 +286,6 @@ const processAndExport = useCallback(async () => {
           }
           globalFrameCount = 0;
           identityBoxes.clear();
-          identityDetCur.clear();
-          identityDetPrev.clear();
           await extractFramesSeeking(file, async (imageData, timestamp) => {
             if (signal.aborted) return false;
             await processFrame(imageData, timestamp);
@@ -313,15 +309,10 @@ const processAndExport = useCallback(async () => {
           if (shouldDetect) {
             const detectedBoxes = await detectFaces(imageData, width, height);
 
-            // Save current detections as previous before updating
-            for (const [id, box] of identityDetCur) {
-              identityDetPrev.set(id, box);
-            }
-
             // One-to-one greedy IOU matching: detected boxes ↔ tracked identities
             const pairs: { detIdx: number; id: number; iou: number }[] = [];
             for (let ci = 0; ci < detectedBoxes.length; ci++) {
-              for (const [id, box] of identityDetCur) {
+              for (const [id, box] of identityBoxes) {
                 const iou = computeIOU(detectedBoxes[ci], box);
                 if (iou > 0.2) pairs.push({ detIdx: ci, id, iou });
               }
@@ -332,8 +323,16 @@ const processAndExport = useCallback(async () => {
             const matchedIds = new Set<number>();
             for (const p of pairs) {
               if (!matchedDets.has(p.detIdx) && !matchedIds.has(p.id)) {
-                identityDetCur.set(p.id, detectedBoxes[p.detIdx]);
-                identityBoxes.set(p.id, detectedBoxes[p.detIdx]);
+                // EMA smoothing: blend new detection with previous position
+                const prev = identityBoxes.get(p.id)!;
+                const det = detectedBoxes[p.detIdx];
+                identityBoxes.set(p.id, {
+                  x1: prev.x1 * (1 - EMA_ALPHA) + det.x1 * EMA_ALPHA,
+                  y1: prev.y1 * (1 - EMA_ALPHA) + det.y1 * EMA_ALPHA,
+                  x2: prev.x2 * (1 - EMA_ALPHA) + det.x2 * EMA_ALPHA,
+                  y2: prev.y2 * (1 - EMA_ALPHA) + det.y2 * EMA_ALPHA,
+                  confidence: det.confidence,
+                });
                 matchedDets.add(p.detIdx);
                 matchedIds.add(p.id);
               }
@@ -350,32 +349,12 @@ const processAndExport = useCallback(async () => {
                 if (iou > bestIOU) { bestIOU = iou; bestId = det.clusterId!; }
               }
               if (bestId >= 0 && selectedIds.has(bestId)) {
-                identityDetCur.set(bestId, detectedBoxes[ci]);
                 identityBoxes.set(bestId, detectedBoxes[ci]);
                 matchedIds.add(bestId);
               }
             }
-
-            lastDetFrame = globalFrameCount;
-          } else {
-            // Non-detection frames: interpolate between fixed prev and cur detection positions
-            const dt = globalFrameCount - lastDetFrame;
-            const t = dt / DETECT_EVERY_N_FRAMES;
-            for (const [id, cur] of identityDetCur) {
-              const prev = identityDetPrev.get(id);
-              if (prev) {
-                // Linear interpolation between two known positions (t ∈ [0, 1])
-                identityBoxes.set(id, {
-                  x1: prev.x1 + (cur.x1 - prev.x1) * t,
-                  y1: prev.y1 + (cur.y1 - prev.y1) * t,
-                  x2: prev.x2 + (cur.x2 - prev.x2) * t,
-                  y2: prev.y2 + (cur.y2 - prev.y2) * t,
-                  confidence: cur.confidence,
-                });
-              }
-              // No prev? identityBoxes keeps the cur detection position
-            }
           }
+          // On non-detection frames: identityBoxes keeps smoothed positions (no movement)
 
           // Build boxes + target indices from identity map
           const boxes: DetectionBox[] = [];

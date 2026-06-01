@@ -17,10 +17,20 @@ const BLUR_OPTIONS: { type: BlurType; label: string; description: string }[] = [
 export function BlurTypeSelector() {
   const blurConfig = useProcessStore((s) => s.blurConfig);
   const setBlurType = useProcessStore((s) => s.setBlurType);
+  const identityBlurTypes = useProcessStore((s) => s.identityBlurTypes);
+
+  const hasPerIdentity = identityBlurTypes.size > 0;
 
   return (
-    <div className="doodle-section space-y-3">
-      <h4 className="text-xs font-semibold text-ink">Blur Type</h4>
+    <div className={`doodle-section space-y-3 ${hasPerIdentity ? 'opacity-40 pointer-events-none' : ''}`}>
+      <h4 className="text-xs font-semibold text-ink">
+        Blur Type
+        {hasPerIdentity && (
+          <span className="ml-2 text-[10px] font-normal text-ink-muted">
+            (per-face overrides active)
+          </span>
+        )}
+      </h4>
       <div className="flex gap-2">
         {BLUR_OPTIONS.map((option) => (
           <button
