@@ -3,8 +3,8 @@ import type { DetectionBox } from '@/types';
 
 const SCRFD_INPUT_SIZE = 640;
 const STRIDES = [8, 16, 32];
-const SCORE_THRESH = 0.55;
-const NMS_THRESH = 0.4;
+const SCORE_THRESH = 0.6;
+const NMS_THRESH = 0.3;
 
 function sigmoid(x: number): number {
   return 1 / (1 + Math.exp(-x));
