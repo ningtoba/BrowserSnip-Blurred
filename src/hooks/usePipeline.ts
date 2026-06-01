@@ -13,6 +13,7 @@ import { clusterFaces } from '@/lib/engine/clustering';
 import { detectFaces } from '@/lib/engine/detection';
 import { recognizeFace } from '@/lib/engine/recognition';
 import { applyPixelateBlur, applyEyeBarBlur, applyBlackBoxBlur } from '@/lib/engine/blur';
+import { KalmanBox } from '@/lib/engine/kalman';
 import { computeIOU } from '@/lib/engine/tracking';
 import { SAMPLE_FPS, PHASE_WEIGHTS, DETECT_EVERY_N_FRAMES } from '@/lib/constants';
 import type { FaceDetection, DetectionBox, FaceIdentity, PipelinePhase, BlurType } from '@/types';
@@ -265,10 +266,8 @@ const processAndExport = useCallback(async () => {
       const ffmpeg = await getFFmpeg();
 
       let globalFrameCount = 0;
-      // Per-identity tracking with velocity prediction + EMA smoothing.
-      const identityBoxes = new Map<number, DetectionBox>(); // smoothed output
-      const identityVelocity = new Map<number, { dx1: number; dy1: number; dx2: number; dy2: number }>();
-      const EMA_ALPHA = 0.6; // blend: 60% new detection + 40% predicted position
+      // Per-identity Kalman filter tracking.
+      const identityKalman = new Map<number, import('@/lib/engine/kalman').KalmanBox>();
       const jpgCanvas = new OffscreenCanvas(width, height);
       const jpgCtx = jpgCanvas.getContext('2d', { willReadFrequently: true })!;
 
@@ -293,8 +292,7 @@ const processAndExport = useCallback(async () => {
             try { await ffmpeg.deleteFile(`frame_${String(f).padStart(4, '0')}.jpg`); } catch { /* ignore */ }
           }
           globalFrameCount = 0;
-          identityBoxes.clear();
-          identityVelocity.clear();
+          identityKalman.clear();
           await extractFramesSeeking(file, async (imageData, timestamp) => {
             if (signal.aborted) return false;
             await processFrame(imageData, timestamp);
@@ -318,17 +316,16 @@ const processAndExport = useCallback(async () => {
           if (shouldDetect) {
             const detectedBoxes = await detectFaces(imageData, width, height);
 
-            // ── Step 1: Match detections to tracked identities via predicted positions ──
+            // ── Step 1: Predict positions for all tracked identities ──
+            const predictedBoxes = new Map<number, DetectionBox>();
+            for (const [id, kf] of identityKalman) {
+              predictedBoxes.set(id, kf.predict());
+            }
+
+            // ── Step 2: Match detections to predicted positions (greedy IOU) ──
             const pairs: { detIdx: number; id: number; iou: number }[] = [];
             for (let ci = 0; ci < detectedBoxes.length; ci++) {
-              for (const [id, box] of identityBoxes) {
-                const vel = identityVelocity.get(id);
-                // Predict where the identity should be now
-                const predBox: DetectionBox = vel ? {
-                  x1: box.x1 + vel.dx1, y1: box.y1 + vel.dy1,
-                  x2: box.x2 + vel.dx2, y2: box.y2 + vel.dy2,
-                  confidence: box.confidence,
-                } : box;
+              for (const [id, predBox] of predictedBoxes) {
                 const iou = computeIOU(detectedBoxes[ci], predBox);
                 if (iou > 0.1) pairs.push({ detIdx: ci, id, iou });
               }
@@ -339,63 +336,43 @@ const processAndExport = useCallback(async () => {
             const matchedIds = new Set<number>();
             for (const p of pairs) {
               if (matchedDets.has(p.detIdx) || matchedIds.has(p.id)) continue;
-
-              const prevBox = identityBoxes.get(p.id)!;
-              const det = detectedBoxes[p.detIdx];
-
-              // Update velocity
-              const prevVel = identityVelocity.get(p.id);
-              const vx = det.x1 - prevBox.x1, vy = det.y1 - prevBox.y1;
-              const vx2 = det.x2 - prevBox.x2, vy2 = det.y2 - prevBox.y2;
-              identityVelocity.set(p.id, {
-                dx1: prevVel ? prevVel.dx1 * 0.5 + vx * 0.5 : vx,
-                dy1: prevVel ? prevVel.dy1 * 0.5 + vy * 0.5 : vy,
-                dx2: prevVel ? prevVel.dx2 * 0.5 + vx2 * 0.5 : vx2,
-                dy2: prevVel ? prevVel.dy2 * 0.5 + vy2 * 0.5 : vy2,
-              });
-
-              // EMA smoothing: blend previous with actual detection
-              identityBoxes.set(p.id, {
-                x1: prevBox.x1 * (1 - EMA_ALPHA) + det.x1 * EMA_ALPHA,
-                y1: prevBox.y1 * (1 - EMA_ALPHA) + det.y1 * EMA_ALPHA,
-                x2: prevBox.x2 * (1 - EMA_ALPHA) + det.x2 * EMA_ALPHA,
-                y2: prevBox.y2 * (1 - EMA_ALPHA) + det.y2 * EMA_ALPHA,
-                confidence: det.confidence,
-              });
+              identityKalman.get(p.id)!.update(detectedBoxes[p.detIdx]);
               matchedDets.add(p.detIdx);
               matchedIds.add(p.id);
             }
 
-            // ── Step 2: Unmatched detections → scan-phase identity matching ──
-            // Try to link unknown detections to scan-phase identities
+            // ── Step 3: Unmatched detections → scan-phase identity matching ──
             for (let ci = 0; ci < detectedBoxes.length; ci++) {
               if (matchedDets.has(ci)) continue;
-              let bestIOU = 0.25;
+              let bestIOU = 0.2;
               let bestId = -1;
               for (const det of scanDetections) {
                 if (det.clusterId === undefined) continue;
                 if (matchedIds.has(det.clusterId)) continue;
-                if (identityBoxes.has(det.clusterId)) continue; // already tracked
+                if (identityKalman.has(det.clusterId)) continue;
                 const iou = computeIOU(detectedBoxes[ci], det);
                 if (iou > bestIOU) { bestIOU = iou; bestId = det.clusterId!; }
               }
               if (bestId >= 0) {
-                identityBoxes.set(bestId, detectedBoxes[ci]);
-                identityVelocity.set(bestId, { dx1: 0, dy1: 0, dx2: 0, dy2: 0 });
+                identityKalman.set(bestId, new KalmanBox(detectedBoxes[ci]));
                 matchedIds.add(bestId);
                 matchedDets.add(ci);
               }
             }
-
-            // Unmatched identities keep their position + velocity (persistence)
+            // Unmatched identities: Kalman filter already predicted their position
+          } else {
+            // Non-detection frames: Kalman filter predicts positions
+            for (const [, kf] of identityKalman) {
+              kf.predict();
+            }
           }
-          // On non-detection frames: identityBoxes keeps smoothed positions
 
-          // Build boxes + target indices from identity map
+          // Build boxes + target indices from Kalman filter state
           const boxes: DetectionBox[] = [];
           const targetIndices = new Set<number>();
           const indexToId = new Map<number, number>();
-          for (const [id, box] of identityBoxes) {
+          for (const [id, kf] of identityKalman) {
+            const box = kf.getState();
             const idx = boxes.length;
             indexToId.set(idx, id);
             boxes.push(box);
