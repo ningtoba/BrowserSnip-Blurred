@@ -1,6 +1,12 @@
 import { useProcessStore } from '@/stores/process-store';
 import type { FaceIdentity, BlurType } from '@/types';
 
+const BLUR_OPTIONS: { type: BlurType; label: string }[] = [
+  { type: 'pixelate', label: 'Mosaic' },
+  { type: 'eye-bar', label: 'Bar' },
+  { type: 'black-box', label: 'Box' },
+];
+
 interface Props {
   identity: FaceIdentity;
   thumbnailUrl?: string;
@@ -16,7 +22,10 @@ export function FaceThumbnail({
 }: Props) {
   const identityBlurTypes = useProcessStore((s) => s.identityBlurTypes);
   const setIdentityBlurType = useProcessStore((s) => s.setIdentityBlurType);
-  const blurType = identityBlurTypes.get(identity.id) ?? 'pixelate';
+  const globalBlurType = useProcessStore((s) => s.blurConfig.type);
+
+  // Show per-identity type if set, otherwise fall back to global
+  const activeType = identityBlurTypes.get(identity.id) ?? globalBlurType;
 
   return (
     <div
@@ -73,17 +82,17 @@ export function FaceThumbnail({
 
       {isSelected && (
         <div className="mt-2.5 pt-2 border-t border-cream-border flex gap-1">
-          {(['pixelate', 'eye-bar'] as BlurType[]).map((t) => (
+          {BLUR_OPTIONS.map((opt) => (
             <button
-              key={t}
-              onClick={(e) => { e.stopPropagation(); setIdentityBlurType(identity.id, t); }}
-              className={`flex-1 text-[9px] py-1 px-1.5 rounded transition-colors ${
-                blurType === t
+              key={opt.type}
+              onClick={(e) => { e.stopPropagation(); setIdentityBlurType(identity.id, opt.type); }}
+              className={`flex-1 text-[9px] py-1 px-1 rounded transition-colors ${
+                activeType === opt.type
                   ? 'bg-accent text-white'
                   : 'bg-cream-soft text-ink-muted hover:bg-cream'
               }`}
             >
-              {t === 'pixelate' ? 'Mosaic' : 'Bar'}
+              {opt.label}
             </button>
           ))}
         </div>

@@ -12,10 +12,10 @@ import { clusterFaces } from '@/lib/engine/clustering';
 // reconstructVideoRaw inlined for batch processing
 import { detectFaces } from '@/lib/engine/detection';
 import { recognizeFace } from '@/lib/engine/recognition';
-import { applyPixelateBlur, applyEyeBarBlur } from '@/lib/engine/blur';
+import { applyPixelateBlur, applyEyeBarBlur, applyBlackBoxBlur } from '@/lib/engine/blur';
 import { computeIOU } from '@/lib/engine/tracking';
 import { SAMPLE_FPS, PHASE_WEIGHTS, DETECT_EVERY_N_FRAMES } from '@/lib/constants';
-import type { FaceDetection, DetectionBox, FaceIdentity, PipelinePhase } from '@/types';
+import type { FaceDetection, DetectionBox, FaceIdentity, PipelinePhase, BlurType } from '@/types';
 import { getFFmpeg } from '@/lib/ffmpeg/core';
 
 function computeOverallPercent(phase: PipelinePhase, phasePercent: number): number {
@@ -208,9 +208,9 @@ function cpuBlurFrame(
   imageData: ImageData,
   boxes: DetectionBox[],
   targetIndices: Set<number>,
-  blurTypeMap: Map<number, 'pixelate' | 'eye-bar'>,
+  blurTypeMap: Map<number, BlurType>,
   indexToId: Map<number, number>,
-  fallbackType: 'pixelate' | 'eye-bar'
+  fallbackType: BlurType
 ): ImageData {
   const canvas = new OffscreenCanvas(imageData.width, imageData.height);
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
@@ -234,8 +234,10 @@ function cpuBlurFrame(
 
     if (type === 'pixelate') {
       applyPixelateBlur(ctx, clamped);
-    } else {
+    } else if (type === 'eye-bar') {
       applyEyeBarBlur(ctx, clamped);
+    } else {
+      applyBlackBoxBlur(ctx, clamped);
     }
   }
 

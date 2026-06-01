@@ -4,13 +4,18 @@ import type { BlurType } from '@/types';
 const BLUR_OPTIONS: { type: BlurType; label: string; description: string }[] = [
   {
     type: 'pixelate',
-    label: 'Pixelated Mosaic',
-    description: 'Blocky pixelation over the entire face region',
+    label: 'Mosaic',
+    description: 'Blocky pixelation over the face',
   },
   {
     type: 'eye-bar',
-    label: 'Black Bar (Eyes)',
-    description: 'Solid black bar covering only the eyes',
+    label: 'Eye Bar',
+    description: 'Black bar over the eyes',
+  },
+  {
+    type: 'black-box',
+    label: 'Black Box',
+    description: 'Solid black rectangle covering the face',
   },
 ];
 
@@ -23,7 +28,6 @@ export function BlurTypeSelector() {
 
   const handleSetBlurType = (type: BlurType) => {
     setBlurType(type);
-    // Clear per-identity overrides when global blur type is changed
     if (hasPerIdentity) {
       useProcessStore.setState({ identityBlurTypes: new Map() });
     }

@@ -30,7 +30,7 @@ export interface FaceIdentity {
   averageEmbedding: Float32Array;
 }
 
-export type BlurType = 'pixelate' | 'eye-bar';
+export type BlurType = 'pixelate' | 'eye-bar' | 'black-box';
 
 export interface BlurConfig {
   type: BlurType;

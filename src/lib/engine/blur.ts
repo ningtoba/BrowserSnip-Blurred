@@ -82,6 +82,20 @@ async function gpuEyebarBlur(
   return gpuFn(imageData, bbox);
 }
 
+function cpuBlackBoxBlur(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  bbox: DetectionBox
+): void {
+  const x = Math.round(bbox.x1);
+  const y = Math.round(bbox.y1);
+  const w = Math.round(bbox.x2 - bbox.x1);
+  const h = Math.round(bbox.y2 - bbox.y1);
+  if (w <= 0 || h <= 0) return;
+
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(x, y, w, h);
+}
+
 // ── Unified blur application ──
 
 export function applyPixelateBlur(
@@ -97,6 +111,13 @@ export function applyEyeBarBlur(
   bbox: DetectionBox
 ): void {
   cpuEyebarBlur(ctx, bbox);
+}
+
+export function applyBlackBoxBlur(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  bbox: DetectionBox
+): void {
+  cpuBlackBoxBlur(ctx, bbox);
 }
 
 export async function applyBlurToFrame(
