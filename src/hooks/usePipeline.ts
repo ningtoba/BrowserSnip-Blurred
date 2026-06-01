@@ -264,9 +264,10 @@ const processAndExport = useCallback(async () => {
       const ffmpeg = await getFFmpeg();
 
       let globalFrameCount = 0;
-      // Per-identity tracking with EMA smoothing to eliminate jitter.
+      // Per-identity tracking with velocity prediction + EMA smoothing.
       const identityBoxes = new Map<number, DetectionBox>(); // smoothed output
-      const EMA_ALPHA = 0.4; // smooth but responsive (detection runs every frame)
+      const identityVelocity = new Map<number, { dx1: number; dy1: number; dx2: number; dy2: number }>();
+      const EMA_ALPHA = 0.6; // blend: 60% new detection + 40% predicted position
       const jpgCanvas = new OffscreenCanvas(width, height);
       const jpgCtx = jpgCanvas.getContext('2d', { willReadFrequently: true })!;
 
@@ -290,6 +291,7 @@ const processAndExport = useCallback(async () => {
           }
           globalFrameCount = 0;
           identityBoxes.clear();
+          identityVelocity.clear();
           await extractFramesSeeking(file, async (imageData, timestamp) => {
             if (signal.aborted) return false;
             await processFrame(imageData, timestamp);
@@ -313,12 +315,29 @@ const processAndExport = useCallback(async () => {
           if (shouldDetect) {
             const detectedBoxes = await detectFaces(imageData, width, height);
 
-            // One-to-one greedy IOU matching: detected boxes ↔ tracked identities
+            // Predict where each tracked identity should be based on velocity
+            const predictedBoxes = new Map<number, DetectionBox>();
+            for (const [id, box] of identityBoxes) {
+              const vel = identityVelocity.get(id);
+              if (vel) {
+                predictedBoxes.set(id, {
+                  x1: box.x1 + vel.dx1,
+                  y1: box.y1 + vel.dy1,
+                  x2: box.x2 + vel.dx2,
+                  y2: box.y2 + vel.dy2,
+                  confidence: box.confidence,
+                });
+              } else {
+                predictedBoxes.set(id, box);
+              }
+            }
+
+            // Match detections to PREDICTED positions (not raw smoothed positions)
             const pairs: { detIdx: number; id: number; iou: number }[] = [];
             for (let ci = 0; ci < detectedBoxes.length; ci++) {
-              for (const [id, box] of identityBoxes) {
-                const iou = computeIOU(detectedBoxes[ci], box);
-                if (iou > 0.2) pairs.push({ detIdx: ci, id, iou });
+              for (const [id, predBox] of predictedBoxes) {
+                const iou = computeIOU(detectedBoxes[ci], predBox);
+                if (iou > 0.15) pairs.push({ detIdx: ci, id, iou });
               }
             }
             pairs.sort((a, b) => b.iou - a.iou);
@@ -327,14 +346,30 @@ const processAndExport = useCallback(async () => {
             const matchedIds = new Set<number>();
             for (const p of pairs) {
               if (!matchedDets.has(p.detIdx) && !matchedIds.has(p.id)) {
-                // EMA smoothing: blend new detection with previous position
                 const prev = identityBoxes.get(p.id)!;
                 const det = detectedBoxes[p.detIdx];
+
+                // Update velocity (EMA of frame-to-frame displacement)
+                const prevVel = identityVelocity.get(p.id);
+                const rawDx1 = det.x1 - prev.x1;
+                const rawDy1 = det.y1 - prev.y1;
+                const rawDx2 = det.x2 - prev.x2;
+                const rawDy2 = det.y2 - prev.y2;
+                const velAlpha = 0.5;
+                identityVelocity.set(p.id, {
+                  dx1: prevVel ? prevVel.dx1 * (1 - velAlpha) + rawDx1 * velAlpha : rawDx1,
+                  dy1: prevVel ? prevVel.dy1 * (1 - velAlpha) + rawDy1 * velAlpha : rawDy1,
+                  dx2: prevVel ? prevVel.dx2 * (1 - velAlpha) + rawDx2 * velAlpha : rawDx2,
+                  dy2: prevVel ? prevVel.dy2 * (1 - velAlpha) + rawDy2 * velAlpha : rawDy2,
+                });
+
+                // EMA smoothing: blend detection with predicted position
+                const predicted = predictedBoxes.get(p.id)!;
                 identityBoxes.set(p.id, {
-                  x1: prev.x1 * (1 - EMA_ALPHA) + det.x1 * EMA_ALPHA,
-                  y1: prev.y1 * (1 - EMA_ALPHA) + det.y1 * EMA_ALPHA,
-                  x2: prev.x2 * (1 - EMA_ALPHA) + det.x2 * EMA_ALPHA,
-                  y2: prev.y2 * (1 - EMA_ALPHA) + det.y2 * EMA_ALPHA,
+                  x1: predicted.x1 * (1 - EMA_ALPHA) + det.x1 * EMA_ALPHA,
+                  y1: predicted.y1 * (1 - EMA_ALPHA) + det.y1 * EMA_ALPHA,
+                  x2: predicted.x2 * (1 - EMA_ALPHA) + det.x2 * EMA_ALPHA,
+                  y2: predicted.y2 * (1 - EMA_ALPHA) + det.y2 * EMA_ALPHA,
                   confidence: det.confidence,
                 });
                 matchedDets.add(p.detIdx);
@@ -342,10 +377,10 @@ const processAndExport = useCallback(async () => {
               }
             }
 
-            // Unmatched detections: try scan-phase identity matching (one-time only)
+            // Unmatched detections: try scan-phase identity matching
             for (let ci = 0; ci < detectedBoxes.length; ci++) {
               if (matchedDets.has(ci)) continue;
-              let bestIOU = 0.35;
+              let bestIOU = 0.25;
               let bestId = -1;
               for (const det of scanDetections) {
                 if (det.clusterId === undefined || matchedIds.has(det.clusterId)) continue;
@@ -358,7 +393,7 @@ const processAndExport = useCallback(async () => {
               }
             }
           }
-          // On non-detection frames: identityBoxes keeps smoothed positions (no movement)
+          // On non-detection frames: identityBoxes keeps smoothed positions
 
           // Build boxes + target indices from identity map
           const boxes: DetectionBox[] = [];
