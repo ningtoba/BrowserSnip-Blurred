@@ -12,7 +12,8 @@ const sessions = new Map<ModelName, SessionEntry>();
 const loading = new Map<ModelName, Promise<void>>();
 let generation = 0;
 
-ort.env.wasm.numThreads = Math.max(2, navigator.hardwareConcurrency || 4);
+// Single-threaded to avoid worker document access issues on GitHub Pages
+ort.env.wasm.numThreads = 1;
 
 function getConfig(name: ModelName) {
   const config = MODELS.find((m) => m.name === name);
