@@ -259,7 +259,7 @@ const processAndExport = useCallback(async () => {
       const blurConfig = state.blurConfig;
       const identities = state.identities;
       const scanDetections = state.allDetections;
-      const totalFrames = Math.ceil(metadata.duration * metadata.fps);
+      let totalFrames = Math.ceil(metadata.duration * metadata.fps);
       const { width, height, fps } = metadata;
       const ffmpeg = await getFFmpeg();
 
@@ -276,7 +276,9 @@ const processAndExport = useCallback(async () => {
       const useWebCodecs = typeof VideoDecoder !== 'undefined';
       if (useWebCodecs) {
         try {
-          for await (const { imageData, timestamp } of decodeFramesWebCodecs(file, signal)) {
+          for await (const { imageData, timestamp } of decodeFramesWebCodecs(file, signal, (count) => {
+            totalFrames = count;
+          })) {
             await processFrame(imageData, timestamp);
           }
         } catch (err) {
@@ -386,10 +388,10 @@ const processAndExport = useCallback(async () => {
           if (globalFrameCount % 10 === 0) {
             const pct = Math.min(99, Math.round((globalFrameCount / totalFrames) * 100));
             updateProgress({
-              phaseDescription: `Processing frames... ${globalFrameCount}`,
+              phaseDescription: `Processing frames... ${globalFrameCount}/${totalFrames}`,
               phasePercent: pct,
               overallPercent: computeOverallPercent('processing-frames', pct),
-              detail: `Frame ${globalFrameCount}`,
+              detail: `Frame ${globalFrameCount}/${totalFrames}`,
             });
           }
       }

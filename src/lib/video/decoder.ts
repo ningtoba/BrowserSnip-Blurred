@@ -241,7 +241,8 @@ function demuxMP4(mp4Buf: ArrayBuffer): Promise<{
 
 export async function* decodeFramesWebCodecs(
   videoFile: File,
-  signal: AbortSignal
+  signal: AbortSignal,
+  onTotalFrames?: (count: number) => void
 ): AsyncGenerator<DecodedFrame> {
   const { getFFmpeg } = await import('@/lib/ffmpeg/core');
   const ffmpeg = await getFFmpeg();
@@ -297,6 +298,9 @@ export async function* decodeFramesWebCodecs(
   // mp4box demuxes the MP4 into codec config + encoded samples
   const mp4Buf = mp4Data.buffer.slice(mp4Data.byteOffset, mp4Data.byteOffset + mp4Data.byteLength);
   const { config, chunks } = await demuxMP4(mp4Buf);
+
+  // Report the actual frame count (from mp4box sample count, not metadata)
+  onTotalFrames?.(chunks.length);
 
   // VideoDecoder decodes the samples
   yield* decodeAndYield(config, chunks, signal);
