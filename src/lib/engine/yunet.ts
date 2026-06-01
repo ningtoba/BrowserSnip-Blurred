@@ -208,13 +208,22 @@ export async function detectFacesYuNet(
 
   const keep = nms(sorted, YUNET_NMS_THRESHOLD);
 
-  const result = keep.map((i) => ({
-    x1: sorted[i * 5],
-    y1: sorted[i * 5 + 1],
-    x2: sorted[i * 5 + 2],
-    y2: sorted[i * 5 + 3],
-    confidence: sorted[i * 5 + 4],
-  }));
+  const result = keep
+    .map((i) => ({
+      x1: sorted[i * 5],
+      y1: sorted[i * 5 + 1],
+      x2: sorted[i * 5 + 2],
+      y2: sorted[i * 5 + 3],
+      confidence: sorted[i * 5 + 4],
+    }))
+    .filter((b) => {
+      // Filter non-face detections: faces are roughly square
+      const w = b.x2 - b.x1;
+      const h = b.y2 - b.y1;
+      if (w < 10 || h < 10) return false;
+      const aspect = w / h;
+      return aspect > 0.4 && aspect < 2.5; // reject elongated shapes (hands, arms)
+    });
 
   return result.length > YUNET_TOP_K ? result.slice(0, YUNET_TOP_K) : result;
 }

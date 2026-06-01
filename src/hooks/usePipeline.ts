@@ -317,14 +317,25 @@ const processAndExport = useCallback(async () => {
           if (shouldDetect) {
             const detectedBoxes = await detectFaces(imageData, width, height);
 
-            // ── Step 1: Predict positions for all tracked identities ──
+            // ── Step 1: Remove stale tracks (unmatched for too long) ──
+            // When a face turns away, the Kalman filter keeps predicting blindly.
+            // After 15 frames without a real detection, stop tracking to prevent
+            // the blur from drifting to wrong areas (hands, background).
+            const MAX_UNMATCHED_FRAMES = 15;
+            for (const [id, kf] of identityKalman) {
+              if (kf.getFramesSinceUpdate() > MAX_UNMATCHED_FRAMES) {
+                identityKalman.delete(id);
+              }
+            }
+
+            // ── Step 2: Predict positions for active tracks ──
             const trackedIds = Array.from(identityKalman.keys());
             const predictedBoxes: DetectionBox[] = [];
             for (const id of trackedIds) {
               predictedBoxes.push(identityKalman.get(id)!.predict());
             }
 
-            // ── Step 2: One-to-one matching (greedy by IOU, best-first) ──
+            // ── Step 3: One-to-one matching (greedy by IOU, best-first) ──
             const matchedDets = new Set<number>();
             const matchedIds = new Set<number>();
 
@@ -338,7 +349,8 @@ const processAndExport = useCallback(async () => {
               }
             }
 
-            // ── Step 3: Unmatched detections → scan-phase identity matching ──
+            // ── Step 4: Unmatched detections → scan-phase identity matching ──
+            // This re-links faces that reappear after occlusion (face turns away and back).
             for (let ci = 0; ci < detectedBoxes.length; ci++) {
               if (matchedDets.has(ci)) continue;
               let bestIOU = 0.2;
@@ -356,7 +368,6 @@ const processAndExport = useCallback(async () => {
                 matchedDets.add(ci);
               }
             }
-            // Unmatched identities: Kalman keeps predicting from last known motion
           } else {
             // Non-detection frames: Kalman filter predicts positions
             for (const [, kf] of identityKalman) {
