@@ -3,7 +3,7 @@ import type { DetectionBox } from '@/types';
 
 const SCRFD_INPUT_SIZE = 640;
 const STRIDES = [8, 16, 32];
-const SCORE_THRESH = 0.7;
+const SCORE_THRESH = 0.55;
 const NMS_THRESH = 0.4;
 
 function sigmoid(x: number): number {
@@ -136,9 +136,11 @@ export async function detectFacesSCRFD(
     .filter((d) => {
       const w = d.x2 - d.x1;
       const h = d.y2 - d.y1;
-      if (w < 10 || h < 10) return false;
+      // Minimum face size: reject tiny detections (likely false positives)
+      if (w < 30 || h < 30) return false;
+      // Aspect ratio: faces are roughly square
       const aspect = w / h;
-      return aspect > 0.4 && aspect < 2.5;
+      return aspect > 0.5 && aspect < 2.0;
     })
     .map((d) => ({ x1: d.x1, y1: d.y1, x2: d.x2, y2: d.y2, confidence: d.score }));
 }
