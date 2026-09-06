@@ -25,7 +25,7 @@ export function MemoryWarning() {
       </svg>
       <div>
         <p className="font-medium">Large file detected ({sizeMB} MB)</p>
-        <p className="mt-0.5 text-warn/70">
+        <p className="mt-0.5 text-ink-soft">
           Processing may be slow and could cause memory issues. Consider trimming the video first.
         </p>
       </div>

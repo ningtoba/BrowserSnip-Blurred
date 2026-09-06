@@ -104,7 +104,7 @@ export default function App() {
               </svg>
               <div>
                 <p className="font-medium">Running on CPU — WebGPU not available</p>
-                <p className="mt-0.5 text-warn/70">
+                <p className="mt-0.5 text-ink-soft">
                   Inference will be 3-6x slower. For best performance, use Chrome 113+ or Edge 113+.
                 </p>
               </div>

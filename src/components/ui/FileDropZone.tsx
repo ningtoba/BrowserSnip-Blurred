@@ -69,12 +69,12 @@ export function FileDropZone() {
         onDrop={onDrop}
         onClick={() => inputRef.current?.click()}
         className={`
-          relative rounded-doodle-lg border-2 border-dashed p-10 text-center
+          relative rounded-doodle-lg border-[1.5px] border-dashed bg-cream-light p-10 text-center
           cursor-pointer transition-all duration-200 select-none
           ${
             dragOver
-              ? 'border-accent bg-accent/5 scale-[1.01]'
-              : 'border-cream-border hover:border-cream-border/60'
+              ? 'border-accent bg-accent/[0.04] scale-[1.01]'
+              : 'border-[#B9B9AF] hover:border-accent hover:bg-accent/[0.02]'
           }
         `}
       >

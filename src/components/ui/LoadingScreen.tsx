@@ -8,7 +8,7 @@ export function LoadingScreen({ message, percent }: Props) {
     <div className="h-screen-safe flex items-center justify-center bg-cream">
       <div className="w-full max-w-md px-6 text-center space-y-6 animate-fade-in">
         <div className="space-y-2">
-          <h1 className="text-lg font-semibold text-ink tracking-wide">
+          <h1 className="text-lg font-semibold text-ink tracking-tight">
             BrowserSnip Face Blur
           </h1>
           <p className="text-xs text-ink-muted">
@@ -17,14 +17,10 @@ export function LoadingScreen({ message, percent }: Props) {
         </div>
 
         <div className="doodle-section space-y-3">
-          <div className="w-full h-1.5 rounded-full bg-cream overflow-hidden">
+          <div className="w-full h-1.5 rounded-full bg-cream-border overflow-hidden">
             <div
-              className="h-full rounded-full transition-all duration-500 ease-out"
-              style={{
-                width: `${percent}%`,
-                background: 'linear-gradient(90deg, #6366f1, #818cf8)',
-                boxShadow: '0 0 12px rgba(99, 102, 241, 0.4)',
-              }}
+              className="h-full rounded-full bg-accent transition-all duration-500 ease-out"
+              style={{ width: `${percent}%` }}
             />
           </div>
           <p className="text-xs text-ink-soft animate-pulse">{message}</p>
