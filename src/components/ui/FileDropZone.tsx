@@ -1,9 +1,11 @@
 import { useCallback, useState, useRef } from 'react';
+import { motion } from 'framer-motion';
 import { useFileStore } from '@/stores/file-store';
 import { useProcessStore } from '@/stores/process-store';
 import { usePipeline } from '@/hooks/usePipeline';
 import { getVideoMetadata } from '@/lib/video/extract';
 import type { VideoMetadata } from '@/types';
+import { springSoft, floatLoop } from '@/lib/motion';
 
 export function FileDropZone() {
   const setFile = useFileStore((s) => s.setFile);
@@ -59,8 +61,8 @@ export function FileDropZone() {
   );
 
   return (
-    <div className="space-y-4 animate-fade-in">
-      <div
+    <div className="space-y-4">
+      <motion.div
         onDragOver={(e) => {
           e.preventDefault();
           setDragOver(true);
@@ -68,38 +70,41 @@ export function FileDropZone() {
         onDragLeave={() => setDragOver(false)}
         onDrop={onDrop}
         onClick={() => inputRef.current?.click()}
-        className={`
-          relative rounded-doodle-lg border-[1.5px] border-dashed bg-cream-light p-10 text-center
-          cursor-pointer transition-all duration-200 select-none
-          ${
-            dragOver
-              ? 'border-accent bg-accent/[0.04] scale-[1.01]'
-              : 'border-[#B9B9AF] hover:border-accent hover:bg-accent/[0.02]'
-          }
-        `}
+        animate={{
+          scale: dragOver ? 1.01 : 1,
+          backgroundColor: dragOver ? 'rgba(37,99,235,0.04)' : '#FFFFFF',
+          borderColor: dragOver ? '#2563EB' : '#B9B9AF',
+        }}
+        transition={springSoft}
+        className="relative rounded-[20px] border-[1.5px] border-dashed p-10 sm:p-12 text-center cursor-pointer select-none shadow-doodle"
       >
-        <div className="space-y-3">
-          <div className="w-12 h-12 mx-auto rounded-full bg-accent/10 flex items-center justify-center">
+        <div className="space-y-4">
+          <motion.div
+            className="w-14 h-14 mx-auto rounded-[16px] flex items-center justify-center"
+            style={{ background: 'rgba(37,99,235,0.08)', color: '#2563EB' }}
+            animate={dragOver ? { y: [0, -6, 0] } : { y: [0, -4, 0] }}
+            transition={floatLoop.transition}
+          >
             <svg
-              className="w-6 h-6 text-accent"
+              className="w-7 h-7"
               fill="none"
               stroke="currentColor"
+              strokeWidth={1.5}
               viewBox="0 0 24 24"
             >
               <path
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                strokeWidth={1.5}
                 d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"
               />
             </svg>
-          </div>
+          </motion.div>
           <div>
-            <p className="text-sm font-medium text-ink-soft">
-              {scanning ? 'Scanning faces...' : 'Drop a video to blur faces'}
+            <p className="text-sm font-medium text-ink">
+              {scanning ? 'Scanning faces…' : 'Drop a video, or click to browse'}
             </p>
-            <p className="text-[11px] text-ink-muted mt-1">
-              MP4, WebM, MOV — up to any size
+            <p className="text-[11px] text-ink-muted mt-1.5">
+              MP4, WebM, MOV — processed on your machine, never uploaded
             </p>
           </div>
         </div>
@@ -110,12 +115,16 @@ export function FileDropZone() {
           className="hidden"
           onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
         />
-      </div>
+      </motion.div>
 
       {error && (
-        <div className="rounded-md p-3 text-xs border border-danger/20 bg-danger/5 text-danger animate-slide-up">
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="rounded-[10px] p-3 text-xs border border-danger/20 bg-danger/5 text-danger"
+        >
           {error}
-        </div>
+        </motion.div>
       )}
     </div>
   );

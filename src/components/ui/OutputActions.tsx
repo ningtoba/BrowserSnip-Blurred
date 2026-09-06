@@ -15,10 +15,13 @@ export function OutputActions() {
 
   return (
     <div className="space-y-4 animate-doodle-pop">
-      <div className="doodle-section space-y-3">
+      <div className="rounded-[14px] p-4 bg-cream-light border border-cream-border shadow-doodle space-y-3">
         <div className="flex items-center justify-between">
           <div>
-            <h3 className="text-sm font-semibold text-ink">Blurred Video Ready</h3>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-success mb-1">
+              Complete
+            </p>
+            <h3 className="font-display text-sm font-semibold text-ink tracking-tight">Blurred video ready</h3>
             <p className="text-[11px] text-ink-muted">
               {sizeMB} MB — same resolution and format as original
             </p>

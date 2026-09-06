@@ -13,17 +13,20 @@ export function FacePicker() {
   const allSelected = identities.length > 0 && identities.every((id) => selectedIdentities.has(id.id));
 
   return (
-    <div className="space-y-4 animate-slide-up">
+    <div className="rounded-[14px] p-4 bg-cream-light border border-cream-border shadow-doodle space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-semibold text-ink">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-accent mb-1">
+            Identities
+          </p>
+          <h3 className="font-display text-sm font-semibold text-ink tracking-tight">
             {identities.length > 0
               ? `${identities.length} identit${identities.length === 1 ? 'y' : 'ies'} detected`
               : 'No faces detected'}
           </h3>
-          <p className="text-[11px] text-ink-muted">
+          <p className="text-[11px] text-ink-muted mt-0.5">
             {identities.length > 0
-              ? 'Select faces to blur, then click Process'
+              ? 'Pick who to hide, then process'
               : 'Try a different video or adjust the clip'}
           </p>
         </div>
@@ -47,7 +50,7 @@ export function FacePicker() {
       </div>
 
       {identities.length > 0 && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           {identities.map((identity) => (
             <FaceThumbnail
               key={identity.id}

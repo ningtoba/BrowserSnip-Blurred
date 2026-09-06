@@ -1,4 +1,6 @@
+import { motion } from 'framer-motion';
 import { useFileStore } from '@/stores/file-store';
+import { fadeUp } from '@/lib/motion';
 
 export function MemoryWarning() {
   const isLargeFile = useFileStore((s) => s.isLargeFile);
@@ -9,7 +11,12 @@ export function MemoryWarning() {
   const sizeMB = (file.size / (1024 * 1024)).toFixed(0);
 
   return (
-    <div className="rounded-md p-3 text-xs border border-warn/20 bg-warn/5 text-warn animate-slide-up flex items-start gap-2">
+    <motion.div
+      variants={fadeUp}
+      initial="hidden"
+      animate="visible"
+      className="rounded-[14px] p-3 text-xs border border-warn/20 bg-warn/5 text-warn flex items-start gap-2"
+    >
       <svg
         className="w-4 h-4 shrink-0 mt-0.5"
         fill="none"
@@ -29,6 +36,6 @@ export function MemoryWarning() {
           Processing may be slow and could cause memory issues. Consider trimming the video first.
         </p>
       </div>
-    </div>
+    </motion.div>
   );
 }

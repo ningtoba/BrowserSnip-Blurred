@@ -34,9 +34,11 @@ export function BlurTypeSelector() {
   };
 
   return (
-    <div className="doodle-section space-y-3">
+    <div className="rounded-[14px] p-4 bg-cream-light border border-cream-border shadow-doodle space-y-3">
       <div className="flex items-center justify-between">
-        <h4 className="text-xs font-semibold text-ink">Blur Type</h4>
+        <h4 className="font-display text-xs font-semibold text-ink tracking-tight uppercase" style={{ letterSpacing: '0.02em' }}>
+          Blur Style
+        </h4>
         {hasPerIdentity && (
           <button
             onClick={() => useProcessStore.setState({ identityBlurTypes: new Map() })}
